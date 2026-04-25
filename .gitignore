@@ -1,0 +1,14 @@
+# Dati locali (vivono solo sul Pi, mai su GitHub)
+mezzi_data.json
+backups/
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

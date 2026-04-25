@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "App Mezzi",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["app.py"],
+      "port": 5001,
+      "cwd": "G:/Programmazione/ClaudeCode/App_Mezzi"
+    }
+  ]
+}

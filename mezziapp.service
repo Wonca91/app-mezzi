@@ -1,0 +1,16 @@
+[Unit]
+Description=App Mezzi (Flask)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/app-mezzi
+ExecStart=/usr/bin/python3 /home/pi/app-mezzi/app.py
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
