@@ -315,6 +315,16 @@ button {
   grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
 }
+.flash-deadlines.four {
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 8px;
+}
+@media (min-width: 480px) {
+  .flash-deadlines.four {
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 8px;
+  }
+}
 
 .dl-col {
   min-width: 0;

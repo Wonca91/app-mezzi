@@ -192,7 +192,7 @@ function renderGarage() {
         ? `Targa: ${escape(m.targa)}`
         : escape((m.marca + " " + m.modello).trim() || "—");
 
-      const slot = (label, sc) => {
+      const slot = (label, sc, valTxt) => {
         if (!sc) {
           return `
             <div class="dl-col">
@@ -209,26 +209,24 @@ function renderGarage() {
             <div class="dl-label">${label}</div>
             <div class="dl-row">
               <span class="dl-icon ${stato}">${ICONS_STATUS[stato] || ICONS_STATUS.ok}</span>
-              <span class="dl-date">${fmtScadShort(sc.data) || "—"}</span>
+              <span class="dl-date">${valTxt}</span>
             </div>
           </div>`;
       };
 
       const sc = m.scadenze_chiave || {};
 
-      // Footer riga: km + tagliando
-      let footerLines = [];
-      footerLines.push(`<span><strong>${Number(m.km_attuali||0).toLocaleString("it-IT")}</strong> km</span>`);
-      if (m.tagliando_km) {
+      // Slot tagliando (km-based)
+      let tagliandoSlot;
+      if (m.tagliando_km && m.tagliando_km.km_target) {
         const t = m.tagliando_km;
-        const cls = t.stato === "critical" ? "crit" : t.stato === "warning" ? "warn" : "ok";
-        const lbl = t.mancanti !== null
-          ? (t.mancanti < 0 ? `Tagliando: superato di ${Math.abs(t.mancanti)} km` : `Tagliando tra ${t.mancanti.toLocaleString("it-IT")} km`)
-          : "Tagliando programmato";
-        footerLines.push(`<span class="card-foot-${cls}">${lbl}</span>`);
-      } else if (m.tagliando_intervallo_km) {
-        footerLines.push(`<span class="card-foot-dim">Tagliando ogni ${m.tagliando_intervallo_km.toLocaleString("it-IT")} km</span>`);
+        tagliandoSlot = slot("Tagliando", t, `${Number(t.km_target).toLocaleString("it-IT")} km`);
+      } else {
+        tagliandoSlot = slot("Tagliando", null, null);
       }
+
+      // Footer: solo km totali del mezzo
+      const footer = `<span><strong>${Number(m.km_attuali||0).toLocaleString("it-IT")}</strong> km</span>`;
 
       return `
         <div class="flash-card" style="--mezzo-color:${m.colore}" onclick="openDrill('${m.id}')">
@@ -241,12 +239,13 @@ function renderGarage() {
           </div>
           <div class="flash-divider"></div>
           <div class="flash-deadlines-label">Prossime scadenze</div>
-          <div class="flash-deadlines">
-            ${slot("Assicurazione", sc.assicurazione)}
-            ${slot("Revisione",    sc.revisione)}
-            ${slot("Bollo",        sc.bollo)}
+          <div class="flash-deadlines four">
+            ${slot("Assicurazione", sc.assicurazione, fmtScadShort(sc.assicurazione?.data) || "—")}
+            ${slot("Revisione",    sc.revisione,    fmtScadShort(sc.revisione?.data) || "—")}
+            ${slot("Bollo",        sc.bollo,        fmtScadShort(sc.bollo?.data) || "—")}
+            ${tagliandoSlot}
           </div>
-          <div class="flash-foot">${footerLines.join(" • ")}</div>
+          <div class="flash-foot">${footer}</div>
         </div>
       `;
     }).join("");
