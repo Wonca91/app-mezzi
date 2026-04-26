@@ -7,11 +7,14 @@ const STATE = {
   scadenze: [],
   spese: [],
   km: [],
-  meta: { tipi_scadenza: [], categorie_spesa: [] },
+  meta: { tipi_scadenza: [], categorie_spesa: [], durata_default_mesi: {} },
   filterScadenze: "*",
   filterSpese: "*",
   filterKm: "*",
+  scadenzeView: "list",   // "list" | "calendar"
+  calMonth: new Date(),   // mese visualizzato in calendario
   drillMezzo: null,
+  drillStats: null,
   currentTab: "garage",
 };
 
@@ -58,18 +61,12 @@ const todayISO = () => new Date().toISOString().slice(0, 10);
 
 const MESI = ["GEN","FEB","MAR","APR","MAG","GIU","LUG","AGO","SET","OTT","NOV","DIC"];
 const MESI_TC = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
+const MESI_FULL = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
 
 function fmtScadShort(iso) {
   if (!iso) return null;
   const d = new Date(iso);
   return `${d.getDate()} ${MESI_TC[d.getMonth()]} ${d.getFullYear()}`;
-}
-
-function statoFromGiorni(gg) {
-  if (gg === null || gg === undefined) return "ok";
-  if (gg <= 7) return "critical";
-  if (gg <= 30) return "warning";
-  return "ok";
 }
 
 function labelGiorni(gg) {
@@ -82,6 +79,57 @@ function labelGiorni(gg) {
   return `Tra ${Math.round(gg/365)} anni`;
 }
 
+// ── Toast ────────────────────────────────────────────────────────────────
+function toast(msg, kind = "info") {
+  let el = $("#toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    document.body.appendChild(el);
+  }
+  el.className = `toast ${kind} show`;
+  el.textContent = msg;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.className = "toast"; }, 2800);
+}
+
+// ── Confirm sheet (sostituisce confirm() nativo) ─────────────────────────
+function confirmSheet(message, { confirmLabel = "Conferma", cancelLabel = "Annulla", danger = false } = {}) {
+  return new Promise((resolve) => {
+    let overlay = $("#confirm-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "confirm-overlay";
+      overlay.className = "modal-overlay";
+      overlay.style.display = "none";
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:340px">
+          <div class="modal-body" style="padding:24px 20px 18px">
+            <p id="confirm-msg" style="margin:0 0 18px;font-size:15px;line-height:1.45;color:var(--text)"></p>
+            <button id="confirm-yes" class="btn-primary" style="margin-bottom:8px"></button>
+            <button id="confirm-no" class="btn-secondary"></button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+    }
+    overlay.querySelector("#confirm-msg").textContent = message;
+    const yes = overlay.querySelector("#confirm-yes");
+    const no = overlay.querySelector("#confirm-no");
+    yes.textContent = confirmLabel;
+    no.textContent = cancelLabel;
+    yes.style.background = danger ? "var(--danger)" : "var(--surface-dark)";
+    overlay.style.display = "flex";
+    const close = (val) => {
+      overlay.style.display = "none";
+      yes.onclick = no.onclick = overlay.onclick = null;
+      resolve(val);
+    };
+    yes.onclick = () => close(true);
+    no.onclick = () => close(false);
+    overlay.onclick = (e) => { if (e.target === overlay) close(false); };
+  });
+}
+
 // ── API ──────────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -89,7 +137,14 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (!res.ok) throw new Error(`API ${path}: ${res.status}`);
+  if (!res.ok) {
+    let msg = `Errore ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j.error) msg = j.error;
+    } catch {}
+    throw new Error(msg);
+  }
   return res.json();
 }
 
@@ -160,6 +215,21 @@ function renderGarage() {
       };
 
       const sc = m.scadenze_chiave || {};
+
+      // Footer riga: km + tagliando
+      let footerLines = [];
+      footerLines.push(`<span><strong>${Number(m.km_attuali||0).toLocaleString("it-IT")}</strong> km</span>`);
+      if (m.tagliando_km) {
+        const t = m.tagliando_km;
+        const cls = t.stato === "critical" ? "crit" : t.stato === "warning" ? "warn" : "ok";
+        const lbl = t.mancanti !== null
+          ? (t.mancanti < 0 ? `Tagliando: superato di ${Math.abs(t.mancanti)} km` : `Tagliando tra ${t.mancanti.toLocaleString("it-IT")} km`)
+          : "Tagliando programmato";
+        footerLines.push(`<span class="card-foot-${cls}">${lbl}</span>`);
+      } else if (m.tagliando_intervallo_km) {
+        footerLines.push(`<span class="card-foot-dim">Tagliando ogni ${m.tagliando_intervallo_km.toLocaleString("it-IT")} km</span>`);
+      }
+
       return `
         <div class="flash-card" style="--mezzo-color:${m.colore}" onclick="openDrill('${m.id}')">
           <div class="flash-head">
@@ -176,12 +246,12 @@ function renderGarage() {
             ${slot("Revisione",    sc.revisione)}
             ${slot("Bollo",        sc.bollo)}
           </div>
+          <div class="flash-foot">${footerLines.join(" • ")}</div>
         </div>
       `;
     }).join("");
   }
 
-  // Subtitle: count overall status
   const tot = STATE.mezzi.length;
   const okN = STATE.mezzi.filter(m => m.stato === "ok").length;
   $("#garage-sub").textContent = tot
@@ -238,11 +308,25 @@ function renderFilters() {
   });
 }
 
-// ── Scadenze ─────────────────────────────────────────────────────────────
+// ── Scadenze (lista o calendario) ────────────────────────────────────────
 function renderScadenze() {
   const tl = $("#timeline-scadenze");
   let items = STATE.scadenze;
   if (STATE.filterScadenze !== "*") items = items.filter(s => s.mezzo_id === STATE.filterScadenze);
+
+  // Toggle view
+  const toggle = $("#scad-view-toggle");
+  if (toggle) {
+    toggle.querySelectorAll("button").forEach(b => {
+      b.classList.toggle("active", b.dataset.view === STATE.scadenzeView);
+    });
+  }
+
+  if (STATE.scadenzeView === "calendar") {
+    renderCalendario(items, tl);
+    return;
+  }
+
   if (!items.length) {
     tl.innerHTML = `<div class="empty-state">Nessuna scadenza. Tocca + per aggiungerne una.</div>`;
     return;
@@ -252,15 +336,23 @@ function renderScadenze() {
     const mezzo = STATE.mezzi.find(m => m.id === s.mezzo_id);
     const stato = s.pagato ? "ok" : (s._stato || "ok");
     const badge = s.pagato ? "Pagato" : (stato === "ok" ? "OK" : stato === "warning" ? "Vicina" : "Urgente");
+    const label = s.km_scadenza
+      ? `${escape(s.tipo)} • ${s.km_scadenza.toLocaleString("it-IT")} km${s.costo ? " • " + fmtEur(s.costo) : ""}`
+      : `${escape(s.tipo)}${s.costo ? " • " + fmtEur(s.costo) : ""}`;
+    const sotto = s.pagato
+      ? "Pagato"
+      : (s.km_scadenza && s._km_mancanti != null && !s.data_scadenza
+          ? (s._km_mancanti < 0 ? `Superato di ${Math.abs(s._km_mancanti)} km` : `Tra ${s._km_mancanti.toLocaleString("it-IT")} km`)
+          : labelGiorni(s._giorni));
     return `
       <div class="upcoming-item" onclick="editScadenza('${s.id}')">
         <div class="upcoming-day">
-          <div class="upcoming-day-num">${d ? d.getDate() : "—"}</div>
+          <div class="upcoming-day-num">${d ? d.getDate() : (s.km_scadenza ? "KM" : "—")}</div>
           <div class="upcoming-day-mon">${d ? MESI[d.getMonth()] : ""}</div>
         </div>
         <div class="upcoming-info">
-          <div class="upcoming-tipo">${escape(s.tipo)}${s.costo ? ` • ${fmtEur(s.costo)}` : ""}</div>
-          <div class="upcoming-mezzo">${escape(mezzo ? mezzo.nome : "?")} • ${s.pagato ? "Pagato" : labelGiorni(s._giorni)}</div>
+          <div class="upcoming-tipo">${label}</div>
+          <div class="upcoming-mezzo">${escape(mezzo ? mezzo.nome : "?")} • ${sotto}</div>
         </div>
         <div class="upcoming-badge ${stato}">${badge}</div>
       </div>
@@ -268,12 +360,131 @@ function renderScadenze() {
   }).join("");
 }
 
+// ── Calendario mensile ───────────────────────────────────────────────────
+function renderCalendario(items, container) {
+  const cur = STATE.calMonth;
+  const year = cur.getFullYear();
+  const month = cur.getMonth();
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month + 1, 0);
+  const daysInMonth = last.getDate();
+  // Lun=0
+  const firstWeekday = (first.getDay() + 6) % 7;
+
+  const byDay = {};
+  items.filter(s => s.data_scadenza && !s.pagato).forEach(s => {
+    const d = new Date(s.data_scadenza);
+    if (d.getFullYear() === year && d.getMonth() === month) {
+      const day = d.getDate();
+      if (!byDay[day]) byDay[day] = [];
+      byDay[day].push(s);
+    }
+  });
+
+  const todayD = new Date();
+  const isCurrentMonth = todayD.getFullYear() === year && todayD.getMonth() === month;
+
+  let html = `
+    <div class="cal-header">
+      <button class="cal-nav" onclick="navMese(-1)" aria-label="Precedente">‹</button>
+      <span class="cal-title">${MESI_FULL[month]} ${year}</span>
+      <button class="cal-nav" onclick="navMese(1)" aria-label="Successivo">›</button>
+    </div>
+    <div class="cal-grid">
+      ${["L","M","M","G","V","S","D"].map(d => `<div class="cal-dow">${d}</div>`).join("")}
+  `;
+  for (let i = 0; i < firstWeekday; i++) html += `<div class="cal-cell empty"></div>`;
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ev = byDay[d] || [];
+    const worst = ev.reduce((acc, s) => {
+      const order = { ok: 0, warning: 1, critical: 2 };
+      return order[s._stato] > order[acc] ? s._stato : acc;
+    }, "ok");
+    const isToday = isCurrentMonth && todayD.getDate() === d;
+    const dots = ev.slice(0, 3).map(s => {
+      const m = STATE.mezzi.find(mm => mm.id === s.mezzo_id);
+      const col = m?.colore || "#888";
+      return `<span class="cal-dot" style="background:${col}"></span>`;
+    }).join("");
+    html += `
+      <div class="cal-cell ${ev.length ? 'has-ev' : ''} ${isToday ? 'today' : ''} stato-${worst}" onclick="${ev.length ? `mostraGiorno(${year},${month},${d})` : ''}">
+        <span class="cal-day-num">${d}</span>
+        ${dots ? `<span class="cal-dots">${dots}</span>` : ''}
+      </div>
+    `;
+  }
+  html += `</div>`;
+
+  // Lista eventi del mese sotto
+  const monthItems = items.filter(s => s.data_scadenza && !s.pagato).filter(s => {
+    const d = new Date(s.data_scadenza);
+    return d.getFullYear() === year && d.getMonth() === month;
+  });
+  if (monthItems.length) {
+    html += `<div class="section-title" style="margin-top:18px">Eventi del mese</div><div class="list">`;
+    monthItems.sort((a,b) => a.data_scadenza.localeCompare(b.data_scadenza)).forEach(s => {
+      const d = new Date(s.data_scadenza);
+      const mezzo = STATE.mezzi.find(mm => mm.id === s.mezzo_id);
+      const stato = s._stato || "ok";
+      html += `
+        <div class="list-item" onclick="editScadenza('${s.id}')">
+          <div class="dl-icon ${stato}" style="width:32px;height:32px">${ICONS_STATUS[stato]}</div>
+          <div class="list-info">
+            <div class="list-line1">${d.getDate()} ${MESI_TC[d.getMonth()]} • ${escape(s.tipo)}</div>
+            <div class="list-line2">${escape(mezzo ? mezzo.nome : "?")}${s.costo ? " • " + fmtEur(s.costo) : ""}</div>
+          </div>
+        </div>
+      `;
+    });
+    html += `</div>`;
+  }
+  container.innerHTML = html;
+}
+
+function navMese(dir) {
+  STATE.calMonth = new Date(STATE.calMonth.getFullYear(), STATE.calMonth.getMonth() + dir, 1);
+  renderScadenze();
+}
+
+function setScadenzeView(view) {
+  STATE.scadenzeView = view;
+  renderScadenze();
+}
+
+function mostraGiorno(year, month, day) {
+  const items = STATE.scadenze.filter(s => {
+    if (!s.data_scadenza || s.pagato) return false;
+    const d = new Date(s.data_scadenza);
+    return d.getFullYear() === year && d.getMonth() === month && d.getDate() === day;
+  });
+  if (!items.length) return;
+  // Apri prima scadenza in modifica (UX rapida)
+  if (items.length === 1) {
+    editScadenza(items[0].id);
+  } else {
+    const html = items.map(s => {
+      const mezzo = STATE.mezzi.find(m => m.id === s.mezzo_id);
+      const stato = s._stato || "ok";
+      return `
+        <div class="list-item" onclick="closeModal();editScadenza('${s.id}')">
+          <div class="dl-icon ${stato}" style="width:32px;height:32px">${ICONS_STATUS[stato]}</div>
+          <div class="list-info">
+            <div class="list-line1">${escape(s.tipo)}</div>
+            <div class="list-line2">${escape(mezzo ? mezzo.nome : "?")}</div>
+          </div>
+          <div class="list-amount">${s.costo ? fmtEur(s.costo) : ""}</div>
+        </div>
+      `;
+    }).join("");
+    openModal(`${day} ${MESI_TC[month]} ${year}`, `<div class="list">${html}</div>`);
+  }
+}
+
 // ── Spese ────────────────────────────────────────────────────────────────
 function renderSpese() {
   let items = STATE.spese;
   if (STATE.filterSpese !== "*") items = items.filter(s => s.mezzo_id === STATE.filterSpese);
 
-  // KPIs
   const oggi = new Date();
   const annoFa = new Date(oggi.getTime() - 365*24*3600*1000).toISOString().slice(0,10);
   const meseInizio = new Date(oggi.getFullYear(), oggi.getMonth(), 1).toISOString().slice(0,10);
@@ -282,7 +493,6 @@ function renderSpese() {
   $("#kpi-tot-anno").textContent = fmtEur(totAnno);
   $("#kpi-tot-mese").textContent = fmtEur(totMese);
 
-  // Bars per categoria (12 mesi)
   const perCat = {};
   items.filter(s => s.data >= annoFa).forEach(s => {
     perCat[s.categoria] = (perCat[s.categoria] || 0) + (Number(s.importo)||0);
@@ -303,19 +513,19 @@ function renderSpese() {
     `).join("");
   }
 
-  // Lista
   const list = $("#lista-spese");
   if (!items.length) {
     list.innerHTML = `<div class="empty-state">Nessuna spesa.</div>`;
   } else {
     list.innerHTML = items.slice(0, 50).map(s => {
       const mezzo = STATE.mezzi.find(m => m.id === s.mezzo_id);
+      const extra = s.litri ? ` • ${s.litri} L` : "";
       return `
         <div class="list-item" onclick="editSpesa('${s.id}')">
           <div class="list-icon">${ICONS_CAT[s.categoria] || ICONS_CAT.altro}</div>
           <div class="list-info">
             <div class="list-line1">${escape(s.categoria)}</div>
-            <div class="list-line2">${escape(mezzo ? mezzo.nome : "?")} • ${fmtDate(s.data)}${s.note ? " • " + escape(s.note) : ""}</div>
+            <div class="list-line2">${escape(mezzo ? mezzo.nome : "?")} • ${fmtDate(s.data)}${extra}${s.note ? " • " + escape(s.note) : ""}</div>
           </div>
           <div class="list-amount">${fmtEur2(s.importo)}</div>
         </div>
@@ -362,16 +572,34 @@ function renderKm() {
 }
 
 // ── Drilldown mezzo ──────────────────────────────────────────────────────
-function openDrill(mezzoId) {
+async function openDrill(mezzoId) {
   STATE.drillMezzo = mezzoId;
+  STATE.drillStats = null;
   const m = STATE.mezzi.find(x => x.id === mezzoId);
   if (!m) return;
   $("#drill-title").textContent = m.nome;
+  $("#drill-overlay").style.display = "flex";
+
+  // primo render veloce (senza stats)
+  renderDrillBody(m);
+
+  // poi fetch stats e re-render
+  try {
+    STATE.drillStats = await api(`/api/stats/${mezzoId}`);
+    renderDrillBody(m);
+  } catch (e) {
+    console.error("stats", e);
+  }
+}
+
+function renderDrillBody(m) {
+  const mezzoId = m.id;
   const scadenze = STATE.scadenze.filter(s => s.mezzo_id === mezzoId);
   const spese = STATE.spese.filter(s => s.mezzo_id === mezzoId);
   const totSpese = spese.reduce((a,s) => a + (Number(s.importo)||0), 0);
+  const stats = STATE.drillStats;
 
-  $("#drill-body").innerHTML = `
+  let kpiHtml = `
     <div class="drill-stats">
       <div class="drill-stat">
         <div class="drill-stat-val">${Number(m.km_attuali||0).toLocaleString("it-IT")}</div>
@@ -385,19 +613,45 @@ function openDrill(mezzoId) {
         <div class="drill-stat-val">${scadenze.filter(s => !s.pagato).length}</div>
         <div class="drill-stat-lbl">Scad. Aperte</div>
       </div>
-    </div>
+    </div>`;
 
-    <div class="section-title" style="margin-top:0">Scadenze</div>
+  if (stats) {
+    const tiles = [];
+    if (stats.eur_km != null) tiles.push({lbl: "€/km (12m)", val: `€ ${stats.eur_km.toFixed(3)}`});
+    if (stats.km_percorsi_anno != null) tiles.push({lbl: "Km/anno", val: stats.km_percorsi_anno.toLocaleString("it-IT")});
+    if (stats.consumo_l_100km != null) tiles.push({lbl: "Consumo", val: `${stats.consumo_l_100km} l/100km`});
+    if (stats.prezzo_medio_l != null) tiles.push({lbl: "Prezzo medio carb.", val: `€ ${stats.prezzo_medio_l.toFixed(3)}/l`});
+    if (tiles.length) {
+      kpiHtml += `
+        <div class="section-title" style="margin:18px 0 10px">Statistiche 12 mesi</div>
+        <div class="stats-grid">
+          ${tiles.map(t => `
+            <div class="stat-tile">
+              <div class="stat-tile-val">${t.val}</div>
+              <div class="stat-tile-lbl">${t.lbl}</div>
+            </div>
+          `).join("")}
+        </div>`;
+    }
+  }
+
+  $("#drill-body").innerHTML = `
+    ${kpiHtml}
+
+    <div class="section-title">Scadenze</div>
     <div class="list" style="margin-bottom:10px">
       ${scadenze.length ? scadenze.map(s => {
         const stato = s.pagato ? "ok" : (s._stato || "ok");
+        const sub = s.pagato
+          ? "Pagato"
+          : (s.km_scadenza && !s.data_scadenza
+              ? `${s.km_scadenza.toLocaleString("it-IT")} km`
+              : fmtDate(s.data_scadenza));
         return `<div class="list-item" onclick="editScadenza('${s.id}')">
-          <div class="list-icon" style="background:${stato==='critical'?'rgba(255,59,48,.15)':stato==='warning'?'rgba(255,149,0,.15)':'var(--surface-alt)'}">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          </div>
+          <div class="dl-icon ${stato}" style="width:32px;height:32px">${ICONS_STATUS[stato]}</div>
           <div class="list-info">
             <div class="list-line1">${escape(s.tipo)}</div>
-            <div class="list-line2">${fmtDate(s.data_scadenza)} ${s.pagato ? "• pagato" : ""}</div>
+            <div class="list-line2">${sub}</div>
           </div>
           <div class="list-amount">${s.costo ? fmtEur(s.costo) : ""}</div>
         </div>`;
@@ -412,7 +666,7 @@ function openDrill(mezzoId) {
           <div class="list-icon">${ICONS_CAT[s.categoria] || ICONS_CAT.altro}</div>
           <div class="list-info">
             <div class="list-line1">${escape(s.categoria)}</div>
-            <div class="list-line2">${fmtDate(s.data)}</div>
+            <div class="list-line2">${fmtDate(s.data)}${s.litri ? " • " + s.litri + " L" : ""}</div>
           </div>
           <div class="list-amount">${fmtEur2(s.importo)}</div>
         </div>
@@ -420,12 +674,12 @@ function openDrill(mezzoId) {
     </div>
     <button class="btn-primary" style="margin-top:10px" onclick="addSpesa('${mezzoId}')">+ Nuova spesa</button>
   `;
-  $("#drill-overlay").style.display = "flex";
 }
 
 function closeDrill() {
   $("#drill-overlay").style.display = "none";
   STATE.drillMezzo = null;
+  STATE.drillStats = null;
 }
 
 function editMezzo() {
@@ -448,25 +702,53 @@ function editMezzo() {
         <option value="scooter_sport" ${m.tipo==='scooter_sport'?'selected':''}>Moto / Scooter sport</option>
       </select>
     </div>
-    <div class="field"><label class="field-label">Km attuali</label><input id="f-km" type="number" value="${m.km_attuali||0}"></div>
+    <div class="row-2">
+      <div class="field"><label class="field-label">Km attuali</label><input id="f-km" type="number" value="${m.km_attuali||0}"></div>
+      <div class="field"><label class="field-label">Tagliando ogni (km)</label><input id="f-tagliando" type="number" value="${m.tagliando_intervallo_km||''}" placeholder="es. 6000"></div>
+    </div>
     <button class="btn-primary" onclick="saveMezzo('${m.id}')">Salva</button>
+    <button class="btn-danger" onclick="askDeleteMezzo('${m.id}')">Elimina mezzo</button>
   `);
 }
 
 async function saveMezzo(id) {
-  const body = {
-    nome: $("#f-nome").value,
-    marca: $("#f-marca").value,
-    modello: $("#f-modello").value,
-    targa: $("#f-targa").value.toUpperCase(),
-    anno: parseInt($("#f-anno").value) || null,
-    tipo: $("#f-tipo").value,
-    km_attuali: parseInt($("#f-km").value) || 0,
-  };
-  await api(`/api/mezzi/${id}`, { method: "PUT", body });
-  closeModal();
-  await reload();
-  if (STATE.drillMezzo) openDrill(id);
+  try {
+    const body = {
+      nome: $("#f-nome").value,
+      marca: $("#f-marca").value,
+      modello: $("#f-modello").value,
+      targa: $("#f-targa").value.toUpperCase(),
+      anno: parseInt($("#f-anno").value) || null,
+      tipo: $("#f-tipo").value,
+      km_attuali: parseInt($("#f-km").value) || 0,
+      tagliando_intervallo_km: parseInt($("#f-tagliando").value) || null,
+    };
+    await api(`/api/mezzi/${id}`, { method: "PUT", body });
+    closeModal();
+    await reload();
+    if (STATE.drillMezzo) openDrill(id);
+    toast("Mezzo aggiornato", "ok");
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function askDeleteMezzo(id) {
+  const m = STATE.mezzi.find(x => x.id === id);
+  const ok = await confirmSheet(
+    `Eliminare ${m?.nome || 'il mezzo'}? Verranno cancellate anche tutte le scadenze, spese e letture km associate.`,
+    { confirmLabel: "Elimina", cancelLabel: "Annulla", danger: true }
+  );
+  if (!ok) return;
+  try {
+    await api(`/api/mezzi/${id}`, { method: "DELETE" });
+    closeModal();
+    closeDrill();
+    await reload();
+    toast("Mezzo eliminato", "ok");
+  } catch (e) {
+    toast(e.message, "err");
+  }
 }
 
 // ── Modal generico ───────────────────────────────────────────────────────
@@ -480,137 +762,182 @@ function closeModal() {
 }
 
 // ── Add/Edit Scadenza ────────────────────────────────────────────────────
-function addScadenza(mezzoId) {
+function _formScadenza(s, mezzoId) {
   const tipiOpt = STATE.meta.tipi_scadenza.map(t =>
-    `<option value="${t}">${t}</option>`).join("");
+    `<option value="${t}" ${t===(s?.tipo||'')?'selected':''}>${t}</option>`).join("");
   const mezziOpt = STATE.mezzi.map(m =>
-    `<option value="${m.id}" ${m.id===mezzoId?'selected':''}>${escape(m.nome)}</option>`).join("");
-  openModal("Nuova scadenza", `
+    `<option value="${m.id}" ${m.id===(s?.mezzo_id||mezzoId)?'selected':''}>${escape(m.nome)}</option>`).join("");
+  return `
     <div class="field"><label class="field-label">Mezzo</label><select id="f-mezzo">${mezziOpt}</select></div>
-    <div class="field"><label class="field-label">Tipo</label><select id="f-tipo">${tipiOpt}</select></div>
+    <div class="field"><label class="field-label">Tipo</label><select id="f-tipo" onchange="aggiornaCampiScadenza()">${tipiOpt}</select></div>
     <div class="row-2">
-      <div class="field"><label class="field-label">Data scadenza</label><input id="f-data" type="date" value="${todayISO()}"></div>
-      <div class="field"><label class="field-label">Costo (€)</label><input id="f-costo" type="number" step="0.01" value=""></div>
+      <div class="field"><label class="field-label">Data scadenza</label><input id="f-data" type="date" value="${s?.data_scadenza||''}"></div>
+      <div class="field"><label class="field-label">Costo (€)</label><input id="f-costo" type="number" step="0.01" inputmode="decimal" value="${s?.costo||''}"></div>
     </div>
-    <div class="field"><label class="field-label">Note</label><textarea id="f-note"></textarea></div>
-    <button class="btn-primary" onclick="saveScadenza()">Salva</button>
-  `);
+    <div class="field" id="f-km-wrap" style="display:none">
+      <label class="field-label">Km scadenza (per tagliandi)</label>
+      <input id="f-km-scad" type="number" inputmode="numeric" value="${s?.km_scadenza||''}" placeholder="es. 10000">
+    </div>
+    <div class="row-2" id="f-intervalli">
+      <div class="field"><label class="field-label">Rinnovo (mesi)</label><input id="f-int-mesi" type="number" value="${s?.intervallo_mesi||''}" placeholder="auto"></div>
+      <div class="field" id="f-int-km-wrap" style="display:none"><label class="field-label">Rinnovo (km)</label><input id="f-int-km" type="number" value="${s?.intervallo_km||''}" placeholder="auto"></div>
+    </div>
+    <div class="field"><label class="field-label">Note</label><textarea id="f-note">${escape(s?.note||'')}</textarea></div>
+    ${s ? `
+      <div class="field" style="display:flex;align-items:center;gap:10px">
+        <input id="f-pagato" type="checkbox" ${s.pagato?'checked':''} style="width:auto;margin:0">
+        <label for="f-pagato" style="margin:0;font-weight:500">Pagato (genera la prossima)</label>
+      </div>` : ""}
+    <button class="btn-primary" onclick="saveScadenza('${s?.id || ''}')">Salva</button>
+    ${s ? `<button class="btn-danger" onclick="askDeleteScadenza('${s.id}')">Elimina</button>` : ""}
+  `;
+}
+
+function aggiornaCampiScadenza() {
+  const tipo = $("#f-tipo")?.value;
+  const isTagliando = tipo === "tagliando";
+  const km = $("#f-km-wrap"); if (km) km.style.display = isTagliando ? "" : "none";
+  const ikm = $("#f-int-km-wrap"); if (ikm) ikm.style.display = isTagliando ? "" : "none";
+}
+
+function addScadenza(mezzoId) {
+  openModal("Nuova scadenza", _formScadenza(null, mezzoId));
+  // imposta default sensati
+  setTimeout(() => {
+    if ($("#f-data") && !$("#f-data").value) $("#f-data").value = todayISO();
+    aggiornaCampiScadenza();
+  }, 0);
 }
 
 function editScadenza(id) {
   const s = STATE.scadenze.find(x => x.id === id);
   if (!s) return;
-  const tipiOpt = STATE.meta.tipi_scadenza.map(t =>
-    `<option value="${t}" ${t===s.tipo?'selected':''}>${t}</option>`).join("");
-  const mezziOpt = STATE.mezzi.map(m =>
-    `<option value="${m.id}" ${m.id===s.mezzo_id?'selected':''}>${escape(m.nome)}</option>`).join("");
-  openModal("Modifica scadenza", `
-    <div class="field"><label class="field-label">Mezzo</label><select id="f-mezzo">${mezziOpt}</select></div>
-    <div class="field"><label class="field-label">Tipo</label><select id="f-tipo">${tipiOpt}</select></div>
-    <div class="row-2">
-      <div class="field"><label class="field-label">Data scadenza</label><input id="f-data" type="date" value="${s.data_scadenza||''}"></div>
-      <div class="field"><label class="field-label">Costo (€)</label><input id="f-costo" type="number" step="0.01" value="${s.costo||''}"></div>
-    </div>
-    <div class="field"><label class="field-label">Note</label><textarea id="f-note">${escape(s.note||'')}</textarea></div>
-    <div class="field" style="display:flex;align-items:center;gap:10px">
-      <input id="f-pagato" type="checkbox" ${s.pagato?'checked':''} style="width:auto;margin:0">
-      <label for="f-pagato" style="margin:0;font-weight:500">Pagato</label>
-    </div>
-    <button class="btn-primary" onclick="saveScadenza('${id}')">Salva</button>
-    <button class="btn-danger" onclick="deleteScadenza('${id}')">Elimina</button>
-  `);
+  openModal("Modifica scadenza", _formScadenza(s));
+  setTimeout(aggiornaCampiScadenza, 0);
 }
 
 async function saveScadenza(id) {
-  const body = {
-    mezzo_id: $("#f-mezzo").value,
-    tipo: $("#f-tipo").value,
-    data_scadenza: $("#f-data").value,
-    costo: parseFloat($("#f-costo").value) || 0,
-    note: $("#f-note").value,
-    pagato: $("#f-pagato") ? $("#f-pagato").checked : false,
-  };
-  if (id) {
-    await api(`/api/scadenze/${id}`, { method: "PUT", body });
-  } else {
-    await api(`/api/scadenze`, { method: "POST", body });
+  try {
+    const body = {
+      mezzo_id: $("#f-mezzo").value,
+      tipo: $("#f-tipo").value,
+      data_scadenza: $("#f-data").value || null,
+      km_scadenza: parseInt($("#f-km-scad")?.value) || null,
+      intervallo_mesi: parseInt($("#f-int-mesi")?.value) || null,
+      intervallo_km: parseInt($("#f-int-km")?.value) || null,
+      costo: parseFloat($("#f-costo").value) || 0,
+      note: $("#f-note").value,
+      pagato: $("#f-pagato") ? $("#f-pagato").checked : false,
+    };
+    let resp;
+    if (id) {
+      resp = await api(`/api/scadenze/${id}`, { method: "PUT", body });
+    } else {
+      resp = await api(`/api/scadenze`, { method: "POST", body });
+    }
+    closeModal();
+    await reload();
+    if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
+    if (resp._rinnovo_creato) {
+      toast("Pagato! Rinnovo creato automaticamente", "ok");
+    } else {
+      toast(id ? "Scadenza aggiornata" : "Scadenza creata", "ok");
+    }
+  } catch (e) {
+    toast(e.message, "err");
   }
-  closeModal();
-  await reload();
-  if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
 }
 
-async function deleteScadenza(id) {
-  if (!confirm("Eliminare questa scadenza?")) return;
-  await api(`/api/scadenze/${id}`, { method: "DELETE" });
-  closeModal();
-  await reload();
-  if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
+async function askDeleteScadenza(id) {
+  const ok = await confirmSheet("Eliminare questa scadenza?", { confirmLabel: "Elimina", danger: true });
+  if (!ok) return;
+  try {
+    await api(`/api/scadenze/${id}`, { method: "DELETE" });
+    closeModal();
+    await reload();
+    if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
+    toast("Scadenza eliminata", "ok");
+  } catch (e) {
+    toast(e.message, "err");
+  }
 }
 
 // ── Add/Edit Spesa ───────────────────────────────────────────────────────
-function addSpesa(mezzoId) {
+function _formSpesa(s, mezzoId) {
   const catOpt = STATE.meta.categorie_spesa.map(c =>
-    `<option value="${c}">${c}</option>`).join("");
+    `<option value="${c}" ${c===(s?.categoria||'')?'selected':''}>${c}</option>`).join("");
   const mezziOpt = STATE.mezzi.map(m =>
-    `<option value="${m.id}" ${m.id===mezzoId?'selected':''}>${escape(m.nome)}</option>`).join("");
-  openModal("Nuova spesa", `
+    `<option value="${m.id}" ${m.id===(s?.mezzo_id||mezzoId)?'selected':''}>${escape(m.nome)}</option>`).join("");
+  return `
     <div class="field"><label class="field-label">Mezzo</label><select id="f-mezzo">${mezziOpt}</select></div>
-    <div class="field"><label class="field-label">Categoria</label><select id="f-cat">${catOpt}</select></div>
+    <div class="field"><label class="field-label">Categoria</label><select id="f-cat" onchange="aggiornaCampiSpesa()">${catOpt}</select></div>
     <div class="row-2">
-      <div class="field"><label class="field-label">Data</label><input id="f-data" type="date" value="${todayISO()}"></div>
-      <div class="field"><label class="field-label">Importo (€)</label><input id="f-importo" type="number" step="0.01" inputmode="decimal"></div>
+      <div class="field"><label class="field-label">Data</label><input id="f-data" type="date" value="${s?.data || todayISO()}"></div>
+      <div class="field"><label class="field-label">Importo (€)</label><input id="f-importo" type="number" step="0.01" inputmode="decimal" value="${s?.importo||''}"></div>
     </div>
-    <div class="field"><label class="field-label">Km al momento (opz.)</label><input id="f-km" type="number"></div>
-    <div class="field"><label class="field-label">Note</label><textarea id="f-note"></textarea></div>
-    <button class="btn-primary" onclick="saveSpesa()">Salva</button>
-  `);
+    <div class="row-2">
+      <div class="field"><label class="field-label">Km al momento (opz.)</label><input id="f-km" type="number" value="${s?.km||''}"></div>
+      <div class="field" id="f-litri-wrap" style="display:none"><label class="field-label">Litri (carburante)</label><input id="f-litri" type="number" step="0.01" inputmode="decimal" value="${s?.litri||''}"></div>
+    </div>
+    <div class="field"><label class="field-label">Note</label><textarea id="f-note">${escape(s?.note||'')}</textarea></div>
+    <button class="btn-primary" onclick="saveSpesa('${s?.id || ''}')">Salva</button>
+    ${s ? `<button class="btn-danger" onclick="askDeleteSpesa('${s.id}')">Elimina</button>` : ""}
+  `;
+}
+
+function aggiornaCampiSpesa() {
+  const cat = $("#f-cat")?.value;
+  const lt = $("#f-litri-wrap"); if (lt) lt.style.display = cat === "carburante" ? "" : "none";
+}
+
+function addSpesa(mezzoId) {
+  openModal("Nuova spesa", _formSpesa(null, mezzoId));
+  setTimeout(aggiornaCampiSpesa, 0);
 }
 
 function editSpesa(id) {
   const s = STATE.spese.find(x => x.id === id);
   if (!s) return;
-  const catOpt = STATE.meta.categorie_spesa.map(c =>
-    `<option value="${c}" ${c===s.categoria?'selected':''}>${c}</option>`).join("");
-  const mezziOpt = STATE.mezzi.map(m =>
-    `<option value="${m.id}" ${m.id===s.mezzo_id?'selected':''}>${escape(m.nome)}</option>`).join("");
-  openModal("Modifica spesa", `
-    <div class="field"><label class="field-label">Mezzo</label><select id="f-mezzo">${mezziOpt}</select></div>
-    <div class="field"><label class="field-label">Categoria</label><select id="f-cat">${catOpt}</select></div>
-    <div class="row-2">
-      <div class="field"><label class="field-label">Data</label><input id="f-data" type="date" value="${s.data||''}"></div>
-      <div class="field"><label class="field-label">Importo (€)</label><input id="f-importo" type="number" step="0.01" value="${s.importo||''}"></div>
-    </div>
-    <div class="field"><label class="field-label">Km al momento (opz.)</label><input id="f-km" type="number" value="${s.km||''}"></div>
-    <div class="field"><label class="field-label">Note</label><textarea id="f-note">${escape(s.note||'')}</textarea></div>
-    <button class="btn-primary" onclick="saveSpesa('${id}')">Salva</button>
-    <button class="btn-danger" onclick="deleteSpesa('${id}')">Elimina</button>
-  `);
+  openModal("Modifica spesa", _formSpesa(s));
+  setTimeout(aggiornaCampiSpesa, 0);
 }
 
 async function saveSpesa(id) {
-  const body = {
-    mezzo_id: $("#f-mezzo").value,
-    categoria: $("#f-cat").value,
-    data: $("#f-data").value,
-    importo: parseFloat($("#f-importo").value) || 0,
-    km: parseInt($("#f-km").value) || null,
-    note: $("#f-note").value,
-  };
-  if (id) {
-    await api(`/api/spese/${id}`, { method: "PUT", body });
-  } else {
-    await api(`/api/spese`, { method: "POST", body });
+  try {
+    const body = {
+      mezzo_id: $("#f-mezzo").value,
+      categoria: $("#f-cat").value,
+      data: $("#f-data").value,
+      importo: parseFloat($("#f-importo").value) || 0,
+      km: parseInt($("#f-km").value) || null,
+      litri: parseFloat($("#f-litri")?.value) || null,
+      note: $("#f-note").value,
+    };
+    if (id) {
+      await api(`/api/spese/${id}`, { method: "PUT", body });
+    } else {
+      await api(`/api/spese`, { method: "POST", body });
+    }
+    closeModal();
+    await reload();
+    if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
+    toast(id ? "Spesa aggiornata" : "Spesa creata", "ok");
+  } catch (e) {
+    toast(e.message, "err");
   }
-  closeModal();
-  await reload();
 }
 
-async function deleteSpesa(id) {
-  if (!confirm("Eliminare questa spesa?")) return;
-  await api(`/api/spese/${id}`, { method: "DELETE" });
-  closeModal();
-  await reload();
+async function askDeleteSpesa(id) {
+  const ok = await confirmSheet("Eliminare questa spesa?", { confirmLabel: "Elimina", danger: true });
+  if (!ok) return;
+  try {
+    await api(`/api/spese/${id}`, { method: "DELETE" });
+    closeModal();
+    await reload();
+    toast("Spesa eliminata", "ok");
+  } catch (e) {
+    toast(e.message, "err");
+  }
 }
 
 // ── Add Km ───────────────────────────────────────────────────────────────
@@ -629,15 +956,21 @@ function addKm(mezzoId) {
 }
 
 async function saveKm() {
-  const body = {
-    mezzo_id: $("#f-mezzo").value,
-    data: $("#f-data").value,
-    km: parseInt($("#f-km").value) || 0,
-    note: $("#f-note").value,
-  };
-  await api(`/api/km`, { method: "POST", body });
-  closeModal();
-  await reload();
+  try {
+    const body = {
+      mezzo_id: $("#f-mezzo").value,
+      data: $("#f-data").value,
+      km: parseInt($("#f-km").value) || 0,
+      note: $("#f-note").value,
+    };
+    await api(`/api/km`, { method: "POST", body });
+    closeModal();
+    await reload();
+    if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
+    toast("Lettura registrata", "ok");
+  } catch (e) {
+    toast(e.message, "err");
+  }
 }
 
 // ── Quick add (FAB top-right) ────────────────────────────────────────────
@@ -652,13 +985,6 @@ function quickAdd() {
   if (tab === "scadenze") addScadenza();
   if (tab === "spese") addSpesa();
   if (tab === "km") addKm();
-}
-
-// ── Utility ──────────────────────────────────────────────────────────────
-function escape(s) {
-  return String(s || "").replace(/[&<>"']/g, m => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-  }[m]));
 }
 
 // ── Deploy ───────────────────────────────────────────────────────────────
@@ -720,7 +1046,8 @@ async function loadDeployStatus() {
 }
 
 async function mRunDeploy() {
-  if (!confirm("Aggiornare il Pi ora? Pochi secondi di downtime.")) return;
+  const ok = await confirmSheet("Aggiornare il Pi ora? Pochi secondi di downtime.", { confirmLabel: "Aggiorna" });
+  if (!ok) return;
   const btn = $("#m-deploy-btn");
   const headline = $("#m-deploy-headline");
   const dot = $("#m-deploy-dot");
@@ -754,6 +1081,7 @@ async function mRunDeploy() {
         headline.textContent = "Completato ✓";
         dot.style.background = "var(--success)";
         await loadDeployStatus();
+        toast("Pi aggiornato", "ok");
       } else {
         headline.textContent = "Il servizio non risponde";
         dot.style.background = "var(--danger)";
@@ -771,6 +1099,13 @@ window.openDeploySheet = openDeploySheet;
 window.closeDeploySheet = closeDeploySheet;
 window.mLoadDeployStatus = loadDeployStatus;
 window.mRunDeploy = mRunDeploy;
+
+// ── Utility ──────────────────────────────────────────────────────────────
+function escape(s) {
+  return String(s || "").replace(/[&<>"']/g, m => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[m]));
+}
 
 // ── Init ─────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {

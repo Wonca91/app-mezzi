@@ -11,6 +11,7 @@ app = Flask(__name__)
 app.json.sort_keys = False
 
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mezzi_data.json")
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
@@ -32,13 +33,14 @@ DEFAULT_DATA = {
         {
             "id": "voge-sr3",
             "nome": "VOGE SR3",
-            "tipo": "scooter_sport",   # scooter_sport | scooter | auto
+            "tipo": "scooter_sport",
             "targa": "",
             "marca": "Voge",
             "modello": "SR3",
             "anno": None,
             "km_attuali": 0,
             "colore": "#00d4ff",
+            "tagliando_intervallo_km": None,
         },
         {
             "id": "askoll",
@@ -50,6 +52,7 @@ DEFAULT_DATA = {
             "anno": None,
             "km_attuali": 0,
             "colore": "#34c759",
+            "tagliando_intervallo_km": None,
         },
         {
             "id": "panda",
@@ -61,11 +64,12 @@ DEFAULT_DATA = {
             "anno": None,
             "km_attuali": 0,
             "colore": "#ff9500",
+            "tagliando_intervallo_km": None,
         },
     ],
-    "scadenze": [],   # { id, mezzo_id, tipo, data_scadenza, costo, note, pagato }
-    "spese": [],      # { id, mezzo_id, data, categoria, importo, km, note }
-    "km_log": [],     # { id, mezzo_id, data, km, note }
+    "scadenze": [],
+    "spese": [],
+    "km_log": [],
 }
 
 TIPI_SCADENZA = ["bollo", "assicurazione", "revisione", "tagliando", "altro"]
@@ -74,10 +78,63 @@ CATEGORIE_SPESA = [
     "pedaggio", "multa", "accessori", "altro",
 ]
 
+# Durata di default (mesi) per il rinnovo automatico
+DURATA_DEFAULT_MESI = {
+    "bollo": 12,
+    "assicurazione": 12,
+    "revisione": 24,
+    "tagliando": 12,
+    "altro": 12,
+}
+
+
+# ── Backup ────────────────────────────────────────────────────────────────────
+_last_daily_backup = None
+
+
+def _do_backup():
+    """Snapshot rolling (max 60) + giornaliero (max 90). Mai blocca l'app."""
+    global _last_daily_backup
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        now = datetime.datetime.now()
+
+        # Rolling
+        ts = now.strftime("%Y%m%d_%H%M%S")
+        dest = os.path.join(BACKUP_DIR, f"mezzi_{ts}.json")
+        shutil.copy2(DB_FILE, dest)
+        rolling = sorted(
+            f for f in os.listdir(BACKUP_DIR)
+            if f.startswith("mezzi_") and f.endswith(".json") and "_" in f[6:]
+        )
+        for old in rolling[:-60]:
+            try:
+                os.remove(os.path.join(BACKUP_DIR, old))
+            except OSError:
+                pass
+
+        # Daily
+        today = now.date()
+        if _last_daily_backup != today:
+            daily_dir = os.path.join(BACKUP_DIR, "daily")
+            os.makedirs(daily_dir, exist_ok=True)
+            daily_dest = os.path.join(daily_dir, f"mezzi_{today}.json")
+            shutil.copy2(DB_FILE, daily_dest)
+            _last_daily_backup = today
+            days = sorted(f for f in os.listdir(daily_dir) if f.endswith(".json"))
+            for old in days[:-90]:
+                try:
+                    os.remove(os.path.join(daily_dir, old))
+                except OSError:
+                    pass
+    except Exception:
+        pass   # un backup non deve mai crashare l'app
+
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 _cache = None
 _cache_mtime = None
+_save_lock = threading.Lock()
 
 
 def load():
@@ -92,25 +149,59 @@ def load():
     # Migrazioni soft
     for key in ("mezzi", "scadenze", "spese", "km_log"):
         data.setdefault(key, [])
+    for m in data["mezzi"]:
+        m.setdefault("tagliando_intervallo_km", None)
+    for s in data["scadenze"]:
+        s.setdefault("km_scadenza", None)
+        s.setdefault("intervallo_km", None)
+        s.setdefault("intervallo_mesi", None)
     _cache = data
     _cache_mtime = file_mtime
     return data
 
 
 def save(data):
+    """Scrittura atomica + backup."""
     global _cache, _cache_mtime
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    _cache = data
-    _cache_mtime = os.path.getmtime(DB_FILE)
+    with _save_lock:
+        # backup PRIMA di sovrascrivere (se esiste già un file)
+        if os.path.exists(DB_FILE):
+            _do_backup()
+        # write atomico (file temporaneo + replace)
+        tmp = DB_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, DB_FILE)
+        _cache = data
+        _cache_mtime = os.path.getmtime(DB_FILE)
 
 
-def find_mezzo(mid):
-    return next((m for m in load()["mezzi"] if m["id"] == mid), None)
+# ── Validazione ───────────────────────────────────────────────────────────────
+def _err(msg, code=400):
+    return jsonify({"error": msg}), code
 
 
+def _mezzo_exists(mezzo_id):
+    return any(m["id"] == mezzo_id for m in load()["mezzi"])
+
+
+def _safe_float(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(v, default=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+# ── Stato scadenza ────────────────────────────────────────────────────────────
 def stato_scadenza(data_scadenza_str):
-    """Ritorna ('ok'|'warning'|'critical', giorni_rimanenti)."""
+    """Ritorna ('ok'|'warning'|'critical', giorni_rimanenti). None se non valido."""
     try:
         d = datetime.date.fromisoformat(data_scadenza_str)
     except (TypeError, ValueError):
@@ -123,7 +214,37 @@ def stato_scadenza(data_scadenza_str):
     return ("ok", delta)
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+def stato_km(km_target, km_attuali):
+    """Per scadenze a chilometraggio: ('ok'|'warning'|'critical', km_mancanti)."""
+    if km_target is None or km_attuali is None:
+        return ("ok", None)
+    delta = int(km_target) - int(km_attuali)
+    if delta <= 200:
+        return ("critical", delta)
+    if delta <= 1000:
+        return ("warning", delta)
+    return ("ok", delta)
+
+
+def stato_combinato(s, mezzo):
+    """Combina stato data + stato km della scadenza. Ritorna il peggiore."""
+    s_data = stato_scadenza(s.get("data_scadenza")) if s.get("data_scadenza") else ("ok", None)
+    s_km = stato_km(s.get("km_scadenza"), mezzo.get("km_attuali", 0)) if s.get("km_scadenza") else ("ok", None)
+    order = {"ok": 0, "warning": 1, "critical": 2}
+    worst = max([s_data[0], s_km[0]], key=lambda x: order[x])
+    return worst, s_data[1], s_km[1]
+
+
+def aggiungi_mesi(d, mesi):
+    """Aggiunge N mesi a una date, gestendo gli overflow di giorno."""
+    y = d.year + (d.month - 1 + mesi) // 12
+    m = (d.month - 1 + mesi) % 12 + 1
+    import calendar as _cal
+    last_day = _cal.monthrange(y, m)[1]
+    return datetime.date(y, m, min(d.day, last_day))
+
+
+# ── Routes base ───────────────────────────────────────────────────────────────
 @app.route("/")
 def root():
     return redirect("/mobile")
@@ -140,7 +261,6 @@ SCADENZE_CHIAVE = ["assicurazione", "revisione", "bollo"]
 
 @app.route("/api/dashboard", methods=["GET"])
 def api_dashboard():
-    """Aggrega lo stato di ogni mezzo per le flash card."""
     data = load()
     out = []
     for m in data["mezzi"]:
@@ -149,9 +269,9 @@ def api_dashboard():
             if s["mezzo_id"] == m["id"] and not s.get("pagato")
         ]
 
-        # Estrai prossima scadenza per ciascuno dei 3 tipi chiave
         chiave = {}
         worst = "ok"
+        order = {"ok": 0, "warning": 1, "critical": 2}
         for tipo in SCADENZE_CHIAVE:
             cand = [s for s in scadenze_mezzo if s.get("tipo") == tipo and s.get("data_scadenza")]
             cand.sort(key=lambda s: s["data_scadenza"])
@@ -159,15 +279,25 @@ def api_dashboard():
                 s = cand[0]
                 stato, gg = stato_scadenza(s["data_scadenza"])
                 chiave[tipo] = {"data": s["data_scadenza"], "stato": stato, "giorni": gg}
-                if stato == "critical":
-                    worst = "critical"
-                elif stato == "warning" and worst != "critical":
-                    worst = "warning"
+                if order[stato] > order[worst]:
+                    worst = stato
             else:
                 chiave[tipo] = None
-                # mancanza di dato = warning visivo (grigio "N.D.") ma non peggiora il worst
 
-        # spese totali ultimo anno
+        # Tagliando: prossimo a chilometraggio (se presente)
+        tagliando_km = None
+        for s in scadenze_mezzo:
+            if s.get("tipo") == "tagliando" and s.get("km_scadenza"):
+                stato, mancanti = stato_km(s["km_scadenza"], m.get("km_attuali", 0))
+                if (tagliando_km is None) or (mancanti is not None and mancanti < tagliando_km["mancanti"]):
+                    tagliando_km = {
+                        "km_target": s["km_scadenza"],
+                        "mancanti": mancanti,
+                        "stato": stato,
+                    }
+                if order[stato] > order[worst]:
+                    worst = stato
+
         oggi = datetime.date.today()
         anno_fa = (oggi - datetime.timedelta(days=365)).isoformat()
         tot_anno = sum(
@@ -184,12 +314,50 @@ def api_dashboard():
             "targa": m.get("targa", ""),
             "km_attuali": m.get("km_attuali", 0),
             "colore": m.get("colore", "#00d4ff"),
+            "tagliando_intervallo_km": m.get("tagliando_intervallo_km"),
             "stato": worst,
             "scadenze_chiave": chiave,
+            "tagliando_km": tagliando_km,
             "spese_anno": round(tot_anno, 2),
             "n_scadenze_aperte": len(scadenze_mezzo),
         })
     return jsonify(out)
+
+
+# ── API: stats per mezzo (€/km, consumo) ──────────────────────────────────────
+@app.route("/api/stats/<mid>", methods=["GET"])
+def api_stats(mid):
+    data = load()
+    m = next((x for x in data["mezzi"] if x["id"] == mid), None)
+    if not m:
+        return _err("mezzo non trovato", 404)
+
+    oggi = datetime.date.today()
+    anno_fa = (oggi - datetime.timedelta(days=365)).isoformat()
+    spese_anno = [s for s in data["spese"] if s["mezzo_id"] == mid and s.get("data", "") >= anno_fa]
+    tot_spese = sum(float(s.get("importo") or 0) for s in spese_anno)
+    tot_carburante = sum(float(s.get("importo") or 0) for s in spese_anno if s.get("categoria") == "carburante")
+    tot_litri = sum(float(s.get("litri") or 0) for s in spese_anno if s.get("categoria") == "carburante")
+
+    # Km percorsi negli ultimi 12 mesi: differenza tra max e min letture
+    letture = [k for k in data["km_log"] if k["mezzo_id"] == mid and k.get("data", "") >= anno_fa]
+    km_anno = None
+    if letture:
+        km_anno = max(k["km"] for k in letture) - min(k["km"] for k in letture)
+
+    eur_km = (tot_spese / km_anno) if (km_anno and km_anno > 0) else None
+    consumo_l_100km = (tot_litri * 100 / km_anno) if (km_anno and km_anno > 0 and tot_litri > 0) else None
+    prezzo_medio_l = (tot_carburante / tot_litri) if (tot_litri > 0) else None
+
+    return jsonify({
+        "tot_spese_anno": round(tot_spese, 2),
+        "tot_carburante_anno": round(tot_carburante, 2),
+        "tot_litri_anno": round(tot_litri, 2),
+        "km_percorsi_anno": km_anno,
+        "eur_km": round(eur_km, 3) if eur_km is not None else None,
+        "consumo_l_100km": round(consumo_l_100km, 1) if consumo_l_100km is not None else None,
+        "prezzo_medio_l": round(prezzo_medio_l, 3) if prezzo_medio_l is not None else None,
+    })
 
 
 # ── API: mezzi ────────────────────────────────────────────────────────────────
@@ -201,17 +369,24 @@ def api_mezzi():
 @app.route("/api/mezzi", methods=["POST"])
 def api_mezzi_create():
     body = request.get_json() or {}
+    nome = (body.get("nome") or "").strip()
+    if not nome:
+        return _err("nome mezzo obbligatorio")
+    tipo = body.get("tipo", "auto")
+    if tipo not in ("auto", "scooter", "scooter_sport"):
+        return _err("tipo non valido")
     data = load()
     new = {
         "id": body.get("id") or str(uuid.uuid4())[:8],
-        "nome": body.get("nome", "Nuovo mezzo"),
-        "tipo": body.get("tipo", "auto"),
-        "targa": body.get("targa", ""),
-        "marca": body.get("marca", ""),
-        "modello": body.get("modello", ""),
+        "nome": nome,
+        "tipo": tipo,
+        "targa": (body.get("targa") or "").upper().strip(),
+        "marca": (body.get("marca") or "").strip(),
+        "modello": (body.get("modello") or "").strip(),
         "anno": body.get("anno"),
-        "km_attuali": int(body.get("km_attuali") or 0),
+        "km_attuali": max(0, _safe_int(body.get("km_attuali"))),
         "colore": body.get("colore", "#00d4ff"),
+        "tagliando_intervallo_km": _safe_int(body.get("tagliando_intervallo_km")) or None,
     }
     data["mezzi"].append(new)
     save(data)
@@ -224,10 +399,19 @@ def api_mezzi_update(mid):
     data = load()
     m = next((x for x in data["mezzi"] if x["id"] == mid), None)
     if not m:
-        return jsonify({"error": "not found"}), 404
-    for k in ("nome", "tipo", "targa", "marca", "modello", "anno", "km_attuali", "colore"):
+        return _err("not found", 404)
+    for k in ("nome", "tipo", "targa", "marca", "modello", "anno", "km_attuali", "colore", "tagliando_intervallo_km"):
         if k in body:
-            m[k] = body[k]
+            v = body[k]
+            if k == "km_attuali":
+                v = max(0, _safe_int(v))
+            elif k == "targa":
+                v = (v or "").upper().strip()
+            elif k == "tagliando_intervallo_km":
+                v = _safe_int(v) or None
+            elif k == "tipo" and v not in ("auto", "scooter", "scooter_sport"):
+                return _err("tipo non valido")
+            m[k] = v
     save(data)
     return jsonify(m)
 
@@ -235,6 +419,8 @@ def api_mezzi_update(mid):
 @app.route("/api/mezzi/<mid>", methods=["DELETE"])
 def api_mezzi_delete(mid):
     data = load()
+    if not any(x["id"] == mid for x in data["mezzi"]):
+        return _err("not found", 404)
     data["mezzi"] = [x for x in data["mezzi"] if x["id"] != mid]
     data["scadenze"] = [x for x in data["scadenze"] if x["mezzo_id"] != mid]
     data["spese"] = [x for x in data["spese"] if x["mezzo_id"] != mid]
@@ -247,32 +433,55 @@ def api_mezzi_delete(mid):
 @app.route("/api/scadenze", methods=["GET"])
 def api_scadenze():
     data = load()
+    mezzi_by_id = {m["id"]: m for m in data["mezzi"]}
     mezzo_id = request.args.get("mezzo_id")
     items = data["scadenze"]
     if mezzo_id:
         items = [s for s in items if s["mezzo_id"] == mezzo_id]
-    # arricchisci con stato calcolato
     for s in items:
-        stato, gg = stato_scadenza(s.get("data_scadenza"))
-        s["_stato"] = stato
+        m = mezzi_by_id.get(s["mezzo_id"])
+        worst, gg, km_mancanti = stato_combinato(s, m or {})
+        s["_stato"] = worst
         s["_giorni"] = gg
+        s["_km_mancanti"] = km_mancanti
     items.sort(key=lambda s: (s.get("pagato", False), s.get("data_scadenza") or "9999"))
     return jsonify(items)
+
+
+def _build_scadenza(body):
+    """Costruisce un oggetto scadenza da un body, con validazione minima."""
+    mezzo_id = body.get("mezzo_id")
+    if not mezzo_id or not _mezzo_exists(mezzo_id):
+        return None, "mezzo_id non valido"
+    tipo = body.get("tipo", "altro")
+    if tipo not in TIPI_SCADENZA:
+        return None, "tipo non valido"
+    data_sc = body.get("data_scadenza") or None
+    km_sc = _safe_int(body.get("km_scadenza")) or None
+    if not data_sc and not km_sc:
+        return None, "specificare almeno data o km di scadenza"
+    costo = max(0.0, _safe_float(body.get("costo")))
+    return {
+        "id": str(uuid.uuid4())[:8],
+        "mezzo_id": mezzo_id,
+        "tipo": tipo,
+        "data_scadenza": data_sc,
+        "km_scadenza": km_sc,
+        "intervallo_mesi": _safe_int(body.get("intervallo_mesi")) or None,
+        "intervallo_km": _safe_int(body.get("intervallo_km")) or None,
+        "costo": costo,
+        "note": (body.get("note") or "").strip(),
+        "pagato": bool(body.get("pagato", False)),
+    }, None
 
 
 @app.route("/api/scadenze", methods=["POST"])
 def api_scadenze_create():
     body = request.get_json() or {}
+    new, err = _build_scadenza(body)
+    if err:
+        return _err(err)
     data = load()
-    new = {
-        "id": str(uuid.uuid4())[:8],
-        "mezzo_id": body["mezzo_id"],
-        "tipo": body.get("tipo", "altro"),
-        "data_scadenza": body.get("data_scadenza"),
-        "costo": float(body.get("costo") or 0),
-        "note": body.get("note", ""),
-        "pagato": bool(body.get("pagato", False)),
-    }
     data["scadenze"].append(new)
     save(data)
     return jsonify(new), 201
@@ -284,17 +493,84 @@ def api_scadenze_update(sid):
     data = load()
     s = next((x for x in data["scadenze"] if x["id"] == sid), None)
     if not s:
-        return jsonify({"error": "not found"}), 404
-    for k in ("mezzo_id", "tipo", "data_scadenza", "costo", "note", "pagato"):
+        return _err("not found", 404)
+
+    pagato_prima = s.get("pagato", False)
+
+    for k in ("mezzo_id", "tipo", "data_scadenza", "km_scadenza",
+              "intervallo_mesi", "intervallo_km", "costo", "note", "pagato"):
         if k in body:
-            s[k] = body[k]
+            v = body[k]
+            if k == "costo":
+                v = max(0.0, _safe_float(v))
+            elif k in ("km_scadenza", "intervallo_mesi", "intervallo_km"):
+                v = _safe_int(v) or None
+            elif k == "tipo" and v not in TIPI_SCADENZA:
+                return _err("tipo non valido")
+            elif k == "mezzo_id" and not _mezzo_exists(v):
+                return _err("mezzo_id non valido")
+            elif k == "pagato":
+                v = bool(v)
+            s[k] = v
+
+    nuova_creata = None
+    if not pagato_prima and s.get("pagato"):
+        nuova_creata = _crea_rinnovo(s, data)
+        if nuova_creata:
+            data["scadenze"].append(nuova_creata)
+
     save(data)
+    if nuova_creata:
+        return jsonify({**s, "_rinnovo_creato": nuova_creata})
     return jsonify(s)
+
+
+def _crea_rinnovo(s, data):
+    """Quando una scadenza diventa 'pagato', genera la successiva con offset."""
+    tipo = s.get("tipo", "altro")
+    mezzo = next((m for m in data["mezzi"] if m["id"] == s["mezzo_id"]), None)
+
+    nuova_data = None
+    nuovo_km = None
+
+    # Offset data
+    intervallo_mesi = s.get("intervallo_mesi") or DURATA_DEFAULT_MESI.get(tipo)
+    if s.get("data_scadenza") and intervallo_mesi:
+        try:
+            base = datetime.date.fromisoformat(s["data_scadenza"])
+            nuova_data = aggiungi_mesi(base, intervallo_mesi).isoformat()
+        except (TypeError, ValueError):
+            pass
+
+    # Offset km
+    intervallo_km = s.get("intervallo_km") or (
+        mezzo.get("tagliando_intervallo_km") if mezzo and tipo == "tagliando" else None
+    )
+    if s.get("km_scadenza") and intervallo_km:
+        nuovo_km = int(s["km_scadenza"]) + int(intervallo_km)
+
+    if not nuova_data and not nuovo_km:
+        return None
+
+    return {
+        "id": str(uuid.uuid4())[:8],
+        "mezzo_id": s["mezzo_id"],
+        "tipo": tipo,
+        "data_scadenza": nuova_data,
+        "km_scadenza": nuovo_km,
+        "intervallo_mesi": s.get("intervallo_mesi"),
+        "intervallo_km": s.get("intervallo_km"),
+        "costo": 0.0,
+        "note": "",
+        "pagato": False,
+    }
 
 
 @app.route("/api/scadenze/<sid>", methods=["DELETE"])
 def api_scadenze_delete(sid):
     data = load()
+    if not any(x["id"] == sid for x in data["scadenze"]):
+        return _err("not found", 404)
     data["scadenze"] = [x for x in data["scadenze"] if x["id"] != sid]
     save(data)
     return jsonify({"ok": True})
@@ -315,15 +591,25 @@ def api_spese():
 @app.route("/api/spese", methods=["POST"])
 def api_spese_create():
     body = request.get_json() or {}
+    mezzo_id = body.get("mezzo_id")
+    if not mezzo_id or not _mezzo_exists(mezzo_id):
+        return _err("mezzo_id non valido")
+    importo = _safe_float(body.get("importo"))
+    if importo <= 0:
+        return _err("importo deve essere > 0")
+    categoria = body.get("categoria", "altro")
+    if categoria not in CATEGORIE_SPESA:
+        return _err("categoria non valida")
     data = load()
     new = {
         "id": str(uuid.uuid4())[:8],
-        "mezzo_id": body["mezzo_id"],
+        "mezzo_id": mezzo_id,
         "data": body.get("data") or datetime.date.today().isoformat(),
-        "categoria": body.get("categoria", "altro"),
-        "importo": float(body.get("importo") or 0),
-        "km": int(body.get("km") or 0) or None,
-        "note": body.get("note", ""),
+        "categoria": categoria,
+        "importo": importo,
+        "km": _safe_int(body.get("km")) or None,
+        "litri": _safe_float(body.get("litri")) or None,
+        "note": (body.get("note") or "").strip(),
     }
     data["spese"].append(new)
     save(data)
@@ -336,10 +622,23 @@ def api_spese_update(sid):
     data = load()
     s = next((x for x in data["spese"] if x["id"] == sid), None)
     if not s:
-        return jsonify({"error": "not found"}), 404
-    for k in ("mezzo_id", "data", "categoria", "importo", "km", "note"):
+        return _err("not found", 404)
+    for k in ("mezzo_id", "data", "categoria", "importo", "km", "litri", "note"):
         if k in body:
-            s[k] = body[k]
+            v = body[k]
+            if k == "importo":
+                v = _safe_float(v)
+                if v <= 0:
+                    return _err("importo deve essere > 0")
+            elif k == "km":
+                v = _safe_int(v) or None
+            elif k == "litri":
+                v = _safe_float(v) or None
+            elif k == "categoria" and v not in CATEGORIE_SPESA:
+                return _err("categoria non valida")
+            elif k == "mezzo_id" and not _mezzo_exists(v):
+                return _err("mezzo_id non valido")
+            s[k] = v
     save(data)
     return jsonify(s)
 
@@ -347,6 +646,8 @@ def api_spese_update(sid):
 @app.route("/api/spese/<sid>", methods=["DELETE"])
 def api_spese_delete(sid):
     data = load()
+    if not any(x["id"] == sid for x in data["spese"]):
+        return _err("not found", 404)
     data["spese"] = [x for x in data["spese"] if x["id"] != sid]
     save(data)
     return jsonify({"ok": True})
@@ -367,19 +668,24 @@ def api_km():
 @app.route("/api/km", methods=["POST"])
 def api_km_create():
     body = request.get_json() or {}
+    mezzo_id = body.get("mezzo_id")
+    if not mezzo_id or not _mezzo_exists(mezzo_id):
+        return _err("mezzo_id non valido")
+    km = _safe_int(body.get("km"))
+    if km <= 0:
+        return _err("km deve essere > 0")
     data = load()
     new = {
         "id": str(uuid.uuid4())[:8],
-        "mezzo_id": body["mezzo_id"],
+        "mezzo_id": mezzo_id,
         "data": body.get("data") or datetime.date.today().isoformat(),
-        "km": int(body.get("km") or 0),
-        "note": body.get("note", ""),
+        "km": km,
+        "note": (body.get("note") or "").strip(),
     }
     data["km_log"].append(new)
-    # aggiorna km_attuali del mezzo se più alto
-    m = next((x for x in data["mezzi"] if x["id"] == new["mezzo_id"]), None)
-    if m and new["km"] > (m.get("km_attuali") or 0):
-        m["km_attuali"] = new["km"]
+    m = next((x for x in data["mezzi"] if x["id"] == mezzo_id), None)
+    if m and km > (m.get("km_attuali") or 0):
+        m["km_attuali"] = km
     save(data)
     return jsonify(new), 201
 
@@ -387,6 +693,8 @@ def api_km_create():
 @app.route("/api/km/<kid>", methods=["DELETE"])
 def api_km_delete(kid):
     data = load()
+    if not any(x["id"] == kid for x in data["km_log"]):
+        return _err("not found", 404)
     data["km_log"] = [x for x in data["km_log"] if x["id"] != kid]
     save(data)
     return jsonify({"ok": True})
@@ -398,6 +706,7 @@ def api_meta():
     return jsonify({
         "tipi_scadenza": TIPI_SCADENZA,
         "categorie_spesa": CATEGORIE_SPESA,
+        "durata_default_mesi": DURATA_DEFAULT_MESI,
     })
 
 
