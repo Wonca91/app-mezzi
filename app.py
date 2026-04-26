@@ -135,6 +135,9 @@ def mobile():
 
 
 # ── API: dashboard ────────────────────────────────────────────────────────────
+SCADENZE_CHIAVE = ["assicurazione", "revisione", "bollo"]
+
+
 @app.route("/api/dashboard", methods=["GET"])
 def api_dashboard():
     """Aggrega lo stato di ogni mezzo per le flash card."""
@@ -145,21 +148,25 @@ def api_dashboard():
             s for s in data["scadenze"]
             if s["mezzo_id"] == m["id"] and not s.get("pagato")
         ]
-        # peggior stato
+
+        # Estrai prossima scadenza per ciascuno dei 3 tipi chiave
+        chiave = {}
         worst = "ok"
-        prossima = None
-        for s in scadenze_mezzo:
-            stato, gg = stato_scadenza(s.get("data_scadenza"))
-            if stato == "critical":
-                worst = "critical"
-            elif stato == "warning" and worst != "critical":
-                worst = "warning"
-            if gg is not None and (prossima is None or gg < prossima["giorni"]):
-                prossima = {
-                    "tipo": s["tipo"],
-                    "data": s["data_scadenza"],
-                    "giorni": gg,
-                }
+        for tipo in SCADENZE_CHIAVE:
+            cand = [s for s in scadenze_mezzo if s.get("tipo") == tipo and s.get("data_scadenza")]
+            cand.sort(key=lambda s: s["data_scadenza"])
+            if cand:
+                s = cand[0]
+                stato, gg = stato_scadenza(s["data_scadenza"])
+                chiave[tipo] = {"data": s["data_scadenza"], "stato": stato, "giorni": gg}
+                if stato == "critical":
+                    worst = "critical"
+                elif stato == "warning" and worst != "critical":
+                    worst = "warning"
+            else:
+                chiave[tipo] = None
+                # mancanza di dato = warning visivo (grigio "N.D.") ma non peggiora il worst
+
         # spese totali ultimo anno
         oggi = datetime.date.today()
         anno_fa = (oggi - datetime.timedelta(days=365)).isoformat()
@@ -178,7 +185,7 @@ def api_dashboard():
             "km_attuali": m.get("km_attuali", 0),
             "colore": m.get("colore", "#00d4ff"),
             "stato": worst,
-            "prossima_scadenza": prossima,
+            "scadenze_chiave": chiave,
             "spese_anno": round(tot_anno, 2),
             "n_scadenze_aperte": len(scadenze_mezzo),
         })

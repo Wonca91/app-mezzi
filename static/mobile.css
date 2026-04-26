@@ -241,13 +241,13 @@ button {
   position: relative;
   background: var(--surface);
   border-radius: var(--radius-lg);
-  padding: 16px 16px 18px;
+  padding: 16px 18px 18px;
   box-shadow: var(--shadow);
   border: 1px solid var(--border);
   overflow: hidden;
   transition: transform .15s, box-shadow .15s;
 }
-.flash-card:active { transform: scale(0.985); }
+.flash-card:active { transform: scale(0.99); }
 
 .flash-card::before {
   content: "";
@@ -257,24 +257,23 @@ button {
   background: var(--mezzo-color, var(--accent));
 }
 
-.flash-top {
+.flash-head {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 14px;
 }
 
 .flash-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, var(--surface-dark) 0%, var(--surface-dark-2) 100%);
-  color: var(--text-on-dark);
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background: var(--surface-alt);
+  color: var(--surface-dark);
   display: grid;
   place-items: center;
   flex-shrink: 0;
 }
-.flash-icon svg { width: 32px; height: 32px; }
+.flash-icon svg { width: 30px; height: 30px; }
 
 .flash-name {
   flex: 1;
@@ -290,60 +289,75 @@ button {
   text-overflow: ellipsis;
 }
 .flash-name-sub {
-  font-size: 12px;
-  color: var(--text-dim);
+  font-size: 13px;
+  color: var(--text-sec);
   margin-top: 2px;
-  font-family: var(--font-mono);
-  letter-spacing: 0.5px;
+  font-weight: 500;
 }
 
-.status-dot {
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  font-weight: 700;
+.flash-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 14px 0 12px;
 }
-.status-dot.ok       { background: rgba(52,199,89,.15);  color: var(--success); }
-.status-dot.warning  { background: rgba(255,149,0,.15);  color: var(--warning); }
-.status-dot.critical { background: rgba(255,59,48,.15);  color: var(--danger); }
-.status-dot svg { width: 22px; height: 22px; }
 
-/* Riga tecnica con km e prossima scadenza */
-.flash-meta {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  background: var(--surface-alt);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
-}
-.flash-meta-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.flash-meta-label {
-  font-size: 10px;
+.flash-deadlines-label {
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
   color: var(--text-dim);
+  margin-bottom: 10px;
 }
-.flash-meta-value {
-  font-size: 14px;
-  font-weight: 600;
+
+.flash-deadlines {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.dl-col {
+  min-width: 0;
+}
+.dl-label {
+  font-size: 12px;
+  font-weight: 700;
   color: var(--text);
-  font-family: var(--font-mono);
+  margin-bottom: 6px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.flash-meta-value.warn  { color: var(--warning); }
-.flash-meta-value.crit  { color: var(--danger); }
+.dl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dl-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #fff;
+}
+.dl-icon svg { width: 11px; height: 11px; stroke-width: 4; }
+.dl-icon.ok       { background: var(--success); }
+.dl-icon.warning  { background: var(--warning); }
+.dl-icon.critical { background: var(--danger); }
+.dl-icon.nd       { background: #9ca3af; }
+
+.dl-date {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dl-date.dim { color: var(--text-dim); font-weight: 500; }
 
 /* ── Upcoming list ───────────────────────────────────────────────────── */
 .upcoming-list {

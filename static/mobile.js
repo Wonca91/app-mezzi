@@ -57,6 +57,13 @@ const fmtDate = (s) => {
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
 const MESI = ["GEN","FEB","MAR","APR","MAG","GIU","LUG","AGO","SET","OTT","NOV","DIC"];
+const MESI_TC = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
+
+function fmtScadShort(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return `${d.getDate()} ${MESI_TC[d.getMonth()]} ${d.getFullYear()}`;
+}
 
 function statoFromGiorni(gg) {
   if (gg === null || gg === undefined) return "ok";
@@ -126,31 +133,48 @@ function renderGarage() {
     grid.innerHTML = `<div class="empty-state">Nessun mezzo. Tocca + per aggiungerne uno.</div>`;
   } else {
     grid.innerHTML = STATE.mezzi.map(m => {
-      const stato = m.stato || "ok";
-      const prossima = m.prossima_scadenza;
-      const prossimaTxt = prossima
-        ? `${prossima.tipo} • ${labelGiorni(prossima.giorni)}`
-        : "Nessuna scadenza";
-      const valClass = stato === "critical" ? "crit" : stato === "warning" ? "warn" : "";
+      const subtitle = m.targa
+        ? `Targa: ${escape(m.targa)}`
+        : escape((m.marca + " " + m.modello).trim() || "—");
+
+      const slot = (label, sc) => {
+        if (!sc) {
+          return `
+            <div class="dl-col">
+              <div class="dl-label">${label}</div>
+              <div class="dl-row">
+                <span class="dl-icon nd">${ICONS_STATUS.critical}</span>
+                <span class="dl-date dim">N.D.</span>
+              </div>
+            </div>`;
+        }
+        const stato = sc.stato || "ok";
+        return `
+          <div class="dl-col">
+            <div class="dl-label">${label}</div>
+            <div class="dl-row">
+              <span class="dl-icon ${stato}">${ICONS_STATUS[stato] || ICONS_STATUS.ok}</span>
+              <span class="dl-date">${fmtScadShort(sc.data) || "—"}</span>
+            </div>
+          </div>`;
+      };
+
+      const sc = m.scadenze_chiave || {};
       return `
         <div class="flash-card" style="--mezzo-color:${m.colore}" onclick="openDrill('${m.id}')">
-          <div class="flash-top">
+          <div class="flash-head">
             <div class="flash-icon">${ICONS_MEZZO[m.tipo] || ICONS_MEZZO.auto}</div>
             <div class="flash-name">
               <div class="flash-name-top">${escape(m.nome)}</div>
-              <div class="flash-name-sub">${escape(m.targa || (m.marca + " " + m.modello).trim() || "—")}</div>
+              <div class="flash-name-sub">${subtitle}</div>
             </div>
-            <div class="status-dot ${stato}">${ICONS_STATUS[stato]}</div>
           </div>
-          <div class="flash-meta">
-            <div class="flash-meta-item">
-              <span class="flash-meta-label">Km</span>
-              <span class="flash-meta-value">${fmtKm(m.km_attuali)}</span>
-            </div>
-            <div class="flash-meta-item">
-              <span class="flash-meta-label">Prossima</span>
-              <span class="flash-meta-value ${valClass}">${escape(prossimaTxt)}</span>
-            </div>
+          <div class="flash-divider"></div>
+          <div class="flash-deadlines-label">Prossime scadenze</div>
+          <div class="flash-deadlines">
+            ${slot("Assicurazione", sc.assicurazione)}
+            ${slot("Revisione",    sc.revisione)}
+            ${slot("Bollo",        sc.bollo)}
           </div>
         </div>
       `;
