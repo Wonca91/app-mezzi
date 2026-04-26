@@ -534,6 +534,48 @@ button {
 .toast.ok       { background: var(--success); }
 .toast.err      { background: var(--danger); }
 
+/* ── Hint box (form tagliando) ───────────────────────────────────────── */
+.hint-box {
+  background: rgba(0,212,255,.08);
+  border-left: 3px solid var(--accent);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+.hint-box strong { color: var(--accent-2); }
+
+/* ── Card proiezione tagliando ───────────────────────────────────────── */
+.proiezione-card {
+  background: linear-gradient(135deg, var(--surface-dark) 0%, var(--surface-dark-2) 100%);
+  color: var(--text-on-dark);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin: 4px 0 16px;
+}
+.proiezione-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+}
+.proiezione-row + .proiezione-row {
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+.proiezione-row span {
+  font-size: 12px;
+  color: rgba(255,255,255,.65);
+  font-weight: 500;
+}
+.proiezione-row strong {
+  font-size: 15px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
 /* ── Upcoming list ───────────────────────────────────────────────────── */
 .upcoming-list {
   display: flex;

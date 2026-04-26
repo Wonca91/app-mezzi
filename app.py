@@ -155,6 +155,9 @@ def load():
         s.setdefault("km_scadenza", None)
         s.setdefault("intervallo_km", None)
         s.setdefault("intervallo_mesi", None)
+        s.setdefault("data_ultimo", None)
+        s.setdefault("km_ultimo", None)
+        s.setdefault("km_per_mese_stima", None)
     _cache = data
     _cache_mtime = file_mtime
     return data
@@ -233,6 +236,46 @@ def stato_combinato(s, mezzo):
     order = {"ok": 0, "warning": 1, "critical": 2}
     worst = max([s_data[0], s_km[0]], key=lambda x: order[x])
     return worst, s_data[1], s_km[1]
+
+
+def calcola_km_per_mese(mezzo_id, data):
+    """Calcola km/mese medio dalle letture km_log + spese con km. None se < 2 letture."""
+    letture = []
+    for k in data["km_log"]:
+        if k["mezzo_id"] == mezzo_id and k.get("data") and k.get("km"):
+            try:
+                letture.append((datetime.date.fromisoformat(k["data"]), int(k["km"])))
+            except (TypeError, ValueError):
+                pass
+    for s in data["spese"]:
+        if s["mezzo_id"] == mezzo_id and s.get("data") and s.get("km"):
+            try:
+                letture.append((datetime.date.fromisoformat(s["data"]), int(s["km"])))
+            except (TypeError, ValueError):
+                pass
+    if len(letture) < 2:
+        return None
+    letture.sort()
+    d_first, km_first = letture[0]
+    d_last, km_last = letture[-1]
+    days = (d_last - d_first).days
+    if days < 1:
+        return None
+    km_diff = km_last - km_first
+    if km_diff <= 0:
+        return None
+    return round(km_diff * 30.4375 / days, 1)  # 30.4375 = 365.25/12
+
+
+def proietta_data(km_target, km_attuali, km_per_mese):
+    """Data prevista in cui si raggiungeranno km_target dato km/mese."""
+    if km_target is None or km_attuali is None or km_per_mese is None or km_per_mese <= 0:
+        return None
+    delta = km_target - km_attuali
+    if delta <= 0:
+        return datetime.date.today().isoformat()
+    giorni = int(delta * 30.4375 / km_per_mese)
+    return (datetime.date.today() + datetime.timedelta(days=giorni)).isoformat()
 
 
 def aggiungi_mesi(d, mesi):
@@ -322,6 +365,21 @@ def api_dashboard():
             "n_scadenze_aperte": len(scadenze_mezzo),
         })
     return jsonify(out)
+
+
+# ── API: proiezione km/mese ──────────────────────────────────────────────────
+@app.route("/api/proiezione/<mid>", methods=["GET"])
+def api_proiezione(mid):
+    data = load()
+    m = next((x for x in data["mezzi"] if x["id"] == mid), None)
+    if not m:
+        return _err("mezzo non trovato", 404)
+    km_per_mese = calcola_km_per_mese(mid, data)
+    return jsonify({
+        "km_per_mese": km_per_mese,
+        "km_attuali": m.get("km_attuali", 0),
+        "metodo": "storico" if km_per_mese else "manuale",
+    })
 
 
 # ── API: stats per mezzo (€/km, consumo) ──────────────────────────────────────
@@ -448,7 +506,7 @@ def api_scadenze():
     return jsonify(items)
 
 
-def _build_scadenza(body):
+def _build_scadenza(body, data):
     """Costruisce un oggetto scadenza da un body, con validazione minima."""
     mezzo_id = body.get("mezzo_id")
     if not mezzo_id or not _mezzo_exists(mezzo_id):
@@ -456,10 +514,28 @@ def _build_scadenza(body):
     tipo = body.get("tipo", "altro")
     if tipo not in TIPI_SCADENZA:
         return None, "tipo non valido"
+
+    mezzo = next((m for m in data["mezzi"] if m["id"] == mezzo_id), {})
     data_sc = body.get("data_scadenza") or None
     km_sc = _safe_int(body.get("km_scadenza")) or None
+    data_ultimo = body.get("data_ultimo") or None
+    km_ultimo = _safe_int(body.get("km_ultimo")) or None
+    intervallo_km = _safe_int(body.get("intervallo_km")) or None
+    intervallo_mesi = _safe_int(body.get("intervallo_mesi")) or None
+    km_per_mese_stima = _safe_float(body.get("km_per_mese_stima")) or None
+
+    # Logica tagliando: se ho km_ultimo + intervallo_km, derivo km_scadenza
+    if tipo == "tagliando":
+        if km_ultimo is not None and intervallo_km:
+            km_sc = km_ultimo + intervallo_km
+        # Se non ho data_scadenza ma ho km_per_mese, la proietto
+        if not data_sc and km_sc is not None:
+            kpm = km_per_mese_stima or calcola_km_per_mese(mezzo_id, data)
+            data_sc = proietta_data(km_sc, mezzo.get("km_attuali", 0), kpm)
+
     if not data_sc and not km_sc:
         return None, "specificare almeno data o km di scadenza"
+
     costo = max(0.0, _safe_float(body.get("costo")))
     return {
         "id": str(uuid.uuid4())[:8],
@@ -467,8 +543,11 @@ def _build_scadenza(body):
         "tipo": tipo,
         "data_scadenza": data_sc,
         "km_scadenza": km_sc,
-        "intervallo_mesi": _safe_int(body.get("intervallo_mesi")) or None,
-        "intervallo_km": _safe_int(body.get("intervallo_km")) or None,
+        "intervallo_mesi": intervallo_mesi,
+        "intervallo_km": intervallo_km,
+        "data_ultimo": data_ultimo,
+        "km_ultimo": km_ultimo,
+        "km_per_mese_stima": km_per_mese_stima,
         "costo": costo,
         "note": (body.get("note") or "").strip(),
         "pagato": bool(body.get("pagato", False)),
@@ -478,10 +557,10 @@ def _build_scadenza(body):
 @app.route("/api/scadenze", methods=["POST"])
 def api_scadenze_create():
     body = request.get_json() or {}
-    new, err = _build_scadenza(body)
+    data = load()
+    new, err = _build_scadenza(body, data)
     if err:
         return _err(err)
-    data = load()
     data["scadenze"].append(new)
     save(data)
     return jsonify(new), 201
@@ -498,13 +577,16 @@ def api_scadenze_update(sid):
     pagato_prima = s.get("pagato", False)
 
     for k in ("mezzo_id", "tipo", "data_scadenza", "km_scadenza",
-              "intervallo_mesi", "intervallo_km", "costo", "note", "pagato"):
+              "intervallo_mesi", "intervallo_km", "data_ultimo", "km_ultimo",
+              "km_per_mese_stima", "costo", "note", "pagato"):
         if k in body:
             v = body[k]
             if k == "costo":
                 v = max(0.0, _safe_float(v))
-            elif k in ("km_scadenza", "intervallo_mesi", "intervallo_km"):
+            elif k in ("km_scadenza", "intervallo_mesi", "intervallo_km", "km_ultimo"):
                 v = _safe_int(v) or None
+            elif k == "km_per_mese_stima":
+                v = _safe_float(v) or None
             elif k == "tipo" and v not in TIPI_SCADENZA:
                 return _err("tipo non valido")
             elif k == "mezzo_id" and not _mezzo_exists(v):
@@ -512,6 +594,16 @@ def api_scadenze_update(sid):
             elif k == "pagato":
                 v = bool(v)
             s[k] = v
+
+    # Se è un tagliando e ho km_ultimo+intervallo_km, ricalcolo km_scadenza
+    if s.get("tipo") == "tagliando":
+        if s.get("km_ultimo") is not None and s.get("intervallo_km"):
+            s["km_scadenza"] = s["km_ultimo"] + s["intervallo_km"]
+        # Se non ho data_scadenza esplicita, proietto da km/mese
+        if not s.get("data_scadenza") and s.get("km_scadenza"):
+            mezzo = next((m for m in data["mezzi"] if m["id"] == s["mezzo_id"]), {})
+            kpm = s.get("km_per_mese_stima") or calcola_km_per_mese(s["mezzo_id"], data)
+            s["data_scadenza"] = proietta_data(s["km_scadenza"], mezzo.get("km_attuali", 0), kpm)
 
     nuova_creata = None
     if not pagato_prima and s.get("pagato"):
@@ -526,28 +618,38 @@ def api_scadenze_update(sid):
 
 
 def _crea_rinnovo(s, data):
-    """Quando una scadenza diventa 'pagato', genera la successiva con offset."""
+    """Quando una scadenza diventa 'pagato', genera la successiva con offset.
+       Per il tagliando: il nuovo 'ultimo' diventa l'attuale km del mezzo,
+       e proietta la prossima data dai km/mese medi."""
     tipo = s.get("tipo", "altro")
     mezzo = next((m for m in data["mezzi"] if m["id"] == s["mezzo_id"]), None)
 
     nuova_data = None
     nuovo_km = None
+    nuovo_data_ultimo = None
+    nuovo_km_ultimo = None
 
-    # Offset data
-    intervallo_mesi = s.get("intervallo_mesi") or DURATA_DEFAULT_MESI.get(tipo)
-    if s.get("data_scadenza") and intervallo_mesi:
-        try:
-            base = datetime.date.fromisoformat(s["data_scadenza"])
-            nuova_data = aggiungi_mesi(base, intervallo_mesi).isoformat()
-        except (TypeError, ValueError):
-            pass
-
-    # Offset km
-    intervallo_km = s.get("intervallo_km") or (
-        mezzo.get("tagliando_intervallo_km") if mezzo and tipo == "tagliando" else None
-    )
-    if s.get("km_scadenza") and intervallo_km:
-        nuovo_km = int(s["km_scadenza"]) + int(intervallo_km)
+    if tipo == "tagliando" and mezzo:
+        # Il tagliando appena pagato è "fatto a oggi" con i km attuali del mezzo
+        nuovo_data_ultimo = datetime.date.today().isoformat()
+        nuovo_km_ultimo = mezzo.get("km_attuali", 0)
+        intervallo_km = s.get("intervallo_km") or mezzo.get("tagliando_intervallo_km")
+        if intervallo_km:
+            nuovo_km = nuovo_km_ultimo + int(intervallo_km)
+            kpm = s.get("km_per_mese_stima") or calcola_km_per_mese(s["mezzo_id"], data)
+            nuova_data = proietta_data(nuovo_km, nuovo_km_ultimo, kpm)
+    else:
+        # Scadenze a data: offset standard
+        intervallo_mesi = s.get("intervallo_mesi") or DURATA_DEFAULT_MESI.get(tipo)
+        if s.get("data_scadenza") and intervallo_mesi:
+            try:
+                base = datetime.date.fromisoformat(s["data_scadenza"])
+                nuova_data = aggiungi_mesi(base, intervallo_mesi).isoformat()
+            except (TypeError, ValueError):
+                pass
+        intervallo_km = s.get("intervallo_km")
+        if s.get("km_scadenza") and intervallo_km:
+            nuovo_km = int(s["km_scadenza"]) + int(intervallo_km)
 
     if not nuova_data and not nuovo_km:
         return None
@@ -560,6 +662,9 @@ def _crea_rinnovo(s, data):
         "km_scadenza": nuovo_km,
         "intervallo_mesi": s.get("intervallo_mesi"),
         "intervallo_km": s.get("intervallo_km"),
+        "data_ultimo": nuovo_data_ultimo,
+        "km_ultimo": nuovo_km_ultimo,
+        "km_per_mese_stima": s.get("km_per_mese_stima"),
         "costo": 0.0,
         "note": "",
         "pagato": False,

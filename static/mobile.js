@@ -768,20 +768,44 @@ function _formScadenza(s, mezzoId) {
   const mezziOpt = STATE.mezzi.map(m =>
     `<option value="${m.id}" ${m.id===(s?.mezzo_id||mezzoId)?'selected':''}>${escape(m.nome)}</option>`).join("");
   return `
-    <div class="field"><label class="field-label">Mezzo</label><select id="f-mezzo">${mezziOpt}</select></div>
+    <div class="field"><label class="field-label">Mezzo</label><select id="f-mezzo" onchange="aggiornaCampiScadenza()">${mezziOpt}</select></div>
     <div class="field"><label class="field-label">Tipo</label><select id="f-tipo" onchange="aggiornaCampiScadenza()">${tipiOpt}</select></div>
-    <div class="row-2">
-      <div class="field"><label class="field-label">Data scadenza</label><input id="f-data" type="date" value="${s?.data_scadenza||''}"></div>
-      <div class="field"><label class="field-label">Costo (€)</label><input id="f-costo" type="number" step="0.01" inputmode="decimal" value="${s?.costo||''}"></div>
+
+    <!-- Sezione DATA (default per tutti tranne tagliando) -->
+    <div id="sez-data">
+      <div class="row-2">
+        <div class="field"><label class="field-label">Data scadenza</label><input id="f-data" type="date" value="${s?.data_scadenza||''}"></div>
+        <div class="field"><label class="field-label">Costo (€)</label><input id="f-costo" type="number" step="0.01" inputmode="decimal" value="${s?.costo||''}"></div>
+      </div>
+      <div class="field"><label class="field-label">Rinnovo (mesi)</label><input id="f-int-mesi" type="number" value="${s?.intervallo_mesi||''}" placeholder="auto: bollo/assic. 12, revisione 24"></div>
     </div>
-    <div class="field" id="f-km-wrap" style="display:none">
-      <label class="field-label">Km scadenza (per tagliandi)</label>
-      <input id="f-km-scad" type="number" inputmode="numeric" value="${s?.km_scadenza||''}" placeholder="es. 10000">
+
+    <!-- Sezione TAGLIANDO (solo se tipo=tagliando) -->
+    <div id="sez-tagliando" style="display:none">
+      <div class="hint-box">
+        Inserisci quando hai fatto <strong>l'ultimo</strong> tagliando e l'intervallo dal libretto. La data del prossimo viene proiettata dai tuoi km medi.
+      </div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">Data ultimo tagliando</label><input id="f-data-ultimo" type="date" value="${s?.data_ultimo||''}" onchange="aggiornaProiezione()"></div>
+        <div class="field"><label class="field-label">Km a quel momento</label><input id="f-km-ultimo" type="number" inputmode="numeric" value="${s?.km_ultimo||''}" onchange="aggiornaProiezione()" oninput="aggiornaProiezione()"></div>
+      </div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">Intervallo libretto (km)</label><input id="f-int-km" type="number" inputmode="numeric" value="${s?.intervallo_km||''}" placeholder="es. 6000" onchange="aggiornaProiezione()" oninput="aggiornaProiezione()"></div>
+        <div class="field"><label class="field-label">Costo previsto (€)</label><input id="f-costo-tag" type="number" step="0.01" inputmode="decimal" value="${s?.costo||''}"></div>
+      </div>
+      <div class="field">
+        <label class="field-label">Km medi al mese
+          <span id="f-kpm-source" style="font-weight:500;color:var(--text-dim);margin-left:6px;text-transform:none;letter-spacing:0">— da storico</span>
+        </label>
+        <input id="f-kpm" type="number" inputmode="numeric" placeholder="auto da storico" onchange="aggiornaProiezione()" oninput="aggiornaProiezione()" value="${s?.km_per_mese_stima||''}">
+      </div>
+      <div class="proiezione-card" id="proiezione-card" style="display:none">
+        <div class="proiezione-row"><span>Prossimo a</span><strong id="proj-km">—</strong></div>
+        <div class="proiezione-row"><span>Data prevista</span><strong id="proj-data">—</strong></div>
+        <div class="proiezione-row"><span>Mancano</span><strong id="proj-rest">—</strong></div>
+      </div>
     </div>
-    <div class="row-2" id="f-intervalli">
-      <div class="field"><label class="field-label">Rinnovo (mesi)</label><input id="f-int-mesi" type="number" value="${s?.intervallo_mesi||''}" placeholder="auto"></div>
-      <div class="field" id="f-int-km-wrap" style="display:none"><label class="field-label">Rinnovo (km)</label><input id="f-int-km" type="number" value="${s?.intervallo_km||''}" placeholder="auto"></div>
-    </div>
+
     <div class="field"><label class="field-label">Note</label><textarea id="f-note">${escape(s?.note||'')}</textarea></div>
     ${s ? `
       <div class="field" style="display:flex;align-items:center;gap:10px">
@@ -793,16 +817,105 @@ function _formScadenza(s, mezzoId) {
   `;
 }
 
-function aggiornaCampiScadenza() {
+let _proiezioneCache = null;
+let _proiezioneMezzoId = null;
+
+async function aggiornaCampiScadenza() {
   const tipo = $("#f-tipo")?.value;
   const isTagliando = tipo === "tagliando";
-  const km = $("#f-km-wrap"); if (km) km.style.display = isTagliando ? "" : "none";
-  const ikm = $("#f-int-km-wrap"); if (ikm) ikm.style.display = isTagliando ? "" : "none";
+  const sezData = $("#sez-data");
+  const sezTag = $("#sez-tagliando");
+  if (sezData) sezData.style.display = isTagliando ? "none" : "";
+  if (sezTag)  sezTag.style.display  = isTagliando ? "" : "none";
+
+  if (isTagliando) {
+    const mezzoId = $("#f-mezzo")?.value;
+    if (mezzoId && mezzoId !== _proiezioneMezzoId) {
+      _proiezioneMezzoId = mezzoId;
+      try {
+        _proiezioneCache = await api(`/api/proiezione/${mezzoId}`);
+      } catch { _proiezioneCache = null; }
+      // Pre-fill: km_ultimo = km_attuali del mezzo se vuoto, intervallo dal mezzo
+      const m = STATE.mezzi.find(x => x.id === mezzoId);
+      if (m) {
+        const kuField = $("#f-km-ultimo");
+        if (kuField && !kuField.value) kuField.value = m.km_attuali || "";
+        const intField = $("#f-int-km");
+        if (intField && !intField.value && m.tagliando_intervallo_km) {
+          intField.value = m.tagliando_intervallo_km;
+        }
+        const dField = $("#f-data-ultimo");
+        if (dField && !dField.value) dField.value = todayISO();
+      }
+    }
+    aggiornaProiezione();
+  }
+}
+
+function aggiornaProiezione() {
+  const dataUltimo = $("#f-data-ultimo")?.value;
+  const kmUltimo = parseInt($("#f-km-ultimo")?.value);
+  const intKm = parseInt($("#f-int-km")?.value);
+  const kpmManual = parseFloat($("#f-kpm")?.value);
+  const mezzoId = $("#f-mezzo")?.value;
+  const m = STATE.mezzi.find(x => x.id === mezzoId);
+  const kmAttuali = m?.km_attuali || 0;
+
+  // Determina km/mese: manual override > storico
+  let kpm = kpmManual;
+  let source = "manuale";
+  if (!kpm || kpm <= 0) {
+    if (_proiezioneCache?.km_per_mese) {
+      kpm = _proiezioneCache.km_per_mese;
+      source = "da storico";
+    } else {
+      kpm = null;
+      source = "inserisci manualmente";
+    }
+  }
+  const kpmEl = $("#f-kpm-source");
+  if (kpmEl) {
+    kpmEl.textContent = `— ${source}` + (kpm ? ` (${kpm.toLocaleString("it-IT")})` : "");
+  }
+  // Pre-fill placeholder visivo se storico
+  const kpmField = $("#f-kpm");
+  if (kpmField && !kpmField.value && _proiezioneCache?.km_per_mese) {
+    kpmField.placeholder = `${_proiezioneCache.km_per_mese.toLocaleString("it-IT")} (storico)`;
+  }
+
+  const card = $("#proiezione-card");
+  if (!card) return;
+
+  if (!kmUltimo || !intKm) {
+    card.style.display = "none";
+    return;
+  }
+  const kmTarget = kmUltimo + intKm;
+  const mancanti = kmTarget - kmAttuali;
+  let dataProj = "—";
+  if (kpm && kpm > 0) {
+    if (mancanti <= 0) dataProj = "ora (in ritardo!)";
+    else {
+      const giorni = Math.round(mancanti * 30.4375 / kpm);
+      const d = new Date();
+      d.setDate(d.getDate() + giorni);
+      dataProj = d.toLocaleDateString("it-IT", { month: "short", year: "numeric" });
+    }
+  } else {
+    dataProj = "(manca km/mese)";
+  }
+  $("#proj-km").textContent = kmTarget.toLocaleString("it-IT") + " km";
+  $("#proj-data").textContent = dataProj;
+  $("#proj-rest").textContent = mancanti > 0
+    ? `${mancanti.toLocaleString("it-IT")} km`
+    : `superato di ${Math.abs(mancanti).toLocaleString("it-IT")} km`;
+  card.style.display = "";
 }
 
 function addScadenza(mezzoId) {
+  _proiezioneCache = null;
+  _proiezioneMezzoId = null;
   openModal("Nuova scadenza", _formScadenza(null, mezzoId));
-  // imposta default sensati
   setTimeout(() => {
     if ($("#f-data") && !$("#f-data").value) $("#f-data").value = todayISO();
     aggiornaCampiScadenza();
@@ -810,6 +923,8 @@ function addScadenza(mezzoId) {
 }
 
 function editScadenza(id) {
+  _proiezioneCache = null;
+  _proiezioneMezzoId = null;
   const s = STATE.scadenze.find(x => x.id === id);
   if (!s) return;
   openModal("Modifica scadenza", _formScadenza(s));
@@ -818,17 +933,25 @@ function editScadenza(id) {
 
 async function saveScadenza(id) {
   try {
+    const tipo = $("#f-tipo").value;
     const body = {
       mezzo_id: $("#f-mezzo").value,
-      tipo: $("#f-tipo").value,
-      data_scadenza: $("#f-data").value || null,
-      km_scadenza: parseInt($("#f-km-scad")?.value) || null,
-      intervallo_mesi: parseInt($("#f-int-mesi")?.value) || null,
-      intervallo_km: parseInt($("#f-int-km")?.value) || null,
-      costo: parseFloat($("#f-costo").value) || 0,
+      tipo: tipo,
       note: $("#f-note").value,
       pagato: $("#f-pagato") ? $("#f-pagato").checked : false,
     };
+    if (tipo === "tagliando") {
+      body.data_ultimo = $("#f-data-ultimo").value || null;
+      body.km_ultimo = parseInt($("#f-km-ultimo").value) || null;
+      body.intervallo_km = parseInt($("#f-int-km").value) || null;
+      body.km_per_mese_stima = parseFloat($("#f-kpm").value) || null;
+      body.costo = parseFloat($("#f-costo-tag").value) || 0;
+      // data_scadenza e km_scadenza li calcola il backend
+    } else {
+      body.data_scadenza = $("#f-data").value || null;
+      body.intervallo_mesi = parseInt($("#f-int-mesi").value) || null;
+      body.costo = parseFloat($("#f-costo").value) || 0;
+    }
     let resp;
     if (id) {
       resp = await api(`/api/scadenze/${id}`, { method: "PUT", body });
