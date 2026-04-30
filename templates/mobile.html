@@ -13,21 +13,24 @@
 </head>
 <body>
 
-<!-- ── Top bar ──────────────────────────────────────────────────────────── -->
+<!-- ── Top bar — Status strip ──────────────────────────────────────────── -->
 <header id="topbar">
   <div class="topbar-left">
-    <span class="logo-mark">
-      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 17h14M5 17l1.5-5.5A2 2 0 0 1 8.5 10h7a2 2 0 0 1 2 1.5L19 17"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="16.5" cy="17.5" r="1.5"/></svg>
+    <span class="logo-mark" aria-label="App Mezzi">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 17h14M5 17l1.5-5.5A2 2 0 0 1 8.5 10h7a2 2 0 0 1 2 1.5L19 17"/><circle cx="7.5" cy="17.5" r="1.5"/><circle cx="16.5" cy="17.5" r="1.5"/></svg>
     </span>
-    <span class="logo-text">Garage</span>
+  </div>
+  <div id="topbar-pulse">
+    <span class="pulse-dot ok"></span>
+    <span class="pulse-summary">—</span>
   </div>
   <div class="topbar-right">
     <button class="icon-btn deploy-btn" id="btn-deploy" onclick="openDeploySheet()" aria-label="Deploy">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><polyline points="12 12 12 21"/><polyline points="8 17 12 21 16 17"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><polyline points="12 12 12 21"/><polyline points="8 17 12 21 16 17"/></svg>
       <span class="deploy-badge" id="deploy-badge" style="display:none"></span>
     </button>
     <button class="icon-btn" id="btn-add-quick" aria-label="Aggiungi">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
     </button>
   </div>
 </header>
@@ -63,32 +66,31 @@
      PANEL: GARAGE (default)
      ══════════════════════════════════════════════════════════════════════ -->
 <section id="panel-garage" class="panel active">
-  <div class="page-title">I miei mezzi</div>
-  <div class="page-sub" id="garage-sub">—</div>
-
-  <div class="flash-grid" id="flash-grid">
-    <!-- popolato da mobile.js -->
+  <div class="page-head">
+    <h1 class="page-title">I miei mezzi</h1>
+    <span class="page-meta" id="garage-meta">—</span>
   </div>
 
-  <div class="section-title">Prossime scadenze</div>
-  <div class="upcoming-list" id="upcoming-list">
-    <!-- popolato da mobile.js -->
-  </div>
+  <div class="flash-grid" id="flash-grid"></div>
 </section>
 
 <!-- ══════════════════════════════════════════════════════════════════════
      PANEL: SCADENZE
      ══════════════════════════════════════════════════════════════════════ -->
 <section id="panel-scadenze" class="panel">
-  <div class="page-title">Scadenze</div>
-  <div class="view-toggle" id="scad-view-toggle">
-    <button class="active" data-view="list" onclick="setScadenzeView('list')">Lista</button>
-    <button data-view="calendar" onclick="setScadenzeView('calendar')">Calendario</button>
+  <div class="page-head">
+    <h1 class="page-title">Scadenze</h1>
+    <span class="page-meta" id="scad-meta">—</span>
+  </div>
+  <div class="seg" id="scad-view-toggle">
+    <div class="seg-pill left" id="seg-pill"></div>
+    <button class="seg-btn active" data-view="list" onclick="setScadenzeView('list')">Lista</button>
+    <button class="seg-btn" data-view="timeline" onclick="setScadenzeView('timeline')">Timeline</button>
   </div>
   <div class="filter-row" id="filter-scadenze">
     <button class="chip active" data-filter="*">Tutti</button>
   </div>
-  <div class="timeline" id="timeline-scadenze">
+  <div id="scadenze-content">
     <div class="empty-state">Nessuna scadenza. Tocca + per aggiungerne una.</div>
   </div>
 </section>
@@ -97,23 +99,36 @@
      PANEL: SPESE
      ══════════════════════════════════════════════════════════════════════ -->
 <section id="panel-spese" class="panel">
-  <div class="page-title">Spese</div>
+  <div class="page-head">
+    <h1 class="page-title">Spese</h1>
+    <span class="page-meta">12 MESI</span>
+  </div>
   <div class="filter-row" id="filter-spese">
     <button class="chip active" data-filter="*">Tutti</button>
   </div>
-  <div class="kpi-row">
-    <div class="kpi-card">
-      <div class="kpi-label">Totale 12 mesi</div>
-      <div class="kpi-value" id="kpi-tot-anno">€ 0</div>
+
+  <div class="kpi-primary">
+    <div class="kpi-primary-eyebrow">Totale 12 mesi</div>
+    <div class="kpi-primary-val" id="kpi-tot-anno">€ 0</div>
+    <div class="kpi-primary-sub" id="kpi-tot-anno-sub">— · €/km medio —</div>
+  </div>
+
+  <div class="kpi-pair">
+    <div class="kpi-sec">
+      <div class="kpi-sec-eyebrow">Mese corr.</div>
+      <div class="kpi-sec-val" id="kpi-tot-mese">€ 0</div>
+      <div class="kpi-sec-hint" id="kpi-tot-mese-sub">—</div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Mese corrente</div>
-      <div class="kpi-value" id="kpi-tot-mese">€ 0</div>
+    <div class="kpi-sec">
+      <div class="kpi-sec-eyebrow">Categoria top</div>
+      <div class="kpi-sec-val" id="kpi-cat-top" style="font-size:16px">—</div>
+      <div class="kpi-sec-hint" id="kpi-cat-top-sub">NESSUN DATO</div>
     </div>
   </div>
+
   <div class="cat-bars" id="cat-bars"></div>
   <div class="section-title">Movimenti</div>
-  <div class="list" id="lista-spese">
+  <div id="lista-spese-wrap">
     <div class="empty-state">Nessuna spesa registrata.</div>
   </div>
 </section>
@@ -122,33 +137,37 @@
      PANEL: KM
      ══════════════════════════════════════════════════════════════════════ -->
 <section id="panel-km" class="panel">
-  <div class="page-title">Chilometri</div>
+  <div class="page-head">
+    <h1 class="page-title">Chilometri</h1>
+    <span class="page-meta" id="km-meta">—</span>
+  </div>
   <div class="filter-row" id="filter-km">
     <button class="chip active" data-filter="*">Tutti</button>
   </div>
   <div class="km-cards" id="km-cards"></div>
   <div class="section-title">Storico letture</div>
-  <div class="list" id="lista-km">
+  <div id="lista-km-wrap">
     <div class="empty-state">Nessuna lettura registrata.</div>
   </div>
 </section>
 
 <!-- ── Bottom nav ──────────────────────────────────────────────────────── -->
 <nav id="bottomnav">
+  <span class="tab-slider" id="tab-slider"></span>
   <button class="nav-btn active" data-tab="garage">
-    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
     <span>Garage</span>
   </button>
   <button class="nav-btn" data-tab="scadenze">
-    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
     <span>Scadenze</span>
   </button>
   <button class="nav-btn" data-tab="spese">
-    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
     <span>Spese</span>
   </button>
   <button class="nav-btn" data-tab="km">
-    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
     <span>Km</span>
   </button>
 </nav>
