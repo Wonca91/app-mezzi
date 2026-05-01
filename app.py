@@ -643,8 +643,23 @@ def api_scadenze_update(sid):
     return jsonify(out)
 
 
+def _data_evento_scadenza(s):
+    """Ritorna la data ISO dell'evento per cui si sta creando la spesa.
+    - Tagliando: data_ultimo (quando il tagliando e' stato fatto)
+    - Altre scadenze a data: data_scadenza (data del pagamento previsto)
+    - Fallback: oggi
+    """
+    tipo = s.get("tipo", "altro")
+    if tipo == "tagliando" and s.get("data_ultimo"):
+        return s["data_ultimo"]
+    if s.get("data_scadenza"):
+        return s["data_scadenza"]
+    return datetime.date.today().isoformat()
+
+
 def _crea_spesa_da_scadenza(s, data):
-    """Quando una scadenza viene segnata pagato, crea una spesa con il costo."""
+    """Quando una scadenza viene segnata pagato, crea una spesa con il costo
+    e la data dell'evento (data_ultimo per tagliando, data_scadenza altrimenti)."""
     costo = float(s.get("costo") or 0)
     if costo <= 0:
         return None
@@ -653,21 +668,22 @@ def _crea_spesa_da_scadenza(s, data):
     if categoria not in CATEGORIE_SPESA:
         categoria = "altro"
     mezzo = next((m for m in data["mezzi"] if m["id"] == s["mezzo_id"]), {})
+    data_evento = _data_evento_scadenza(s)
     nota_data = ""
-    if s.get("data_scadenza"):
+    if data_evento:
         try:
-            nota_data = datetime.date.fromisoformat(s["data_scadenza"]).strftime("%d/%m/%Y")
+            nota_data = datetime.date.fromisoformat(data_evento).strftime("%d/%m/%Y")
         except (TypeError, ValueError):
             pass
-    elif s.get("km_scadenza"):
+    if not nota_data and s.get("km_scadenza"):
         nota_data = f"{int(s['km_scadenza'])} km"
     return {
         "id": str(uuid.uuid4())[:8],
         "mezzo_id": s["mezzo_id"],
-        "data": datetime.date.today().isoformat(),
+        "data": data_evento,
         "categoria": categoria,
         "importo": costo,
-        "km": mezzo.get("km_attuali") or None,
+        "km": (s.get("km_ultimo") if tipo == "tagliando" else mezzo.get("km_attuali")) or None,
         "litri": None,
         "note": f"Pagamento {tipo}" + (f" {nota_data}" if nota_data else ""),
     }
@@ -897,10 +913,11 @@ def api_km_delete(kid):
 @app.route("/api/maintenance/backfill-spese", methods=["POST"])
 def api_backfill_spese():
     """Per ogni scadenza con pagato=true e costo>0, verifica se esiste una
-       spesa associata; se no, la crea. Match: stesso mezzo + stesso importo
-       + nota che inizia con 'Pagamento <tipo>'."""
+       spesa associata; se no, la crea. Se gia' esiste ma con dati sbagliati
+       (data, km, nota), li corregge alla forma canonica (data evento)."""
     data = load()
     created = []
+    fixed = []
     skipped = []
     for s in data["scadenze"]:
         if not s.get("pagato"):
@@ -910,24 +927,38 @@ def api_backfill_spese():
             continue
         tipo = s.get("tipo", "altro")
         prefix = f"Pagamento {tipo}"
-        # cerca match esistente
         match = next((sp for sp in data["spese"]
                       if sp["mezzo_id"] == s["mezzo_id"]
                       and abs(float(sp.get("importo") or 0) - costo) < 0.01
                       and (sp.get("note") or "").startswith(prefix)), None)
-        if match:
-            skipped.append({"scadenza_id": s["id"], "spesa_id": match["id"]})
+
+        canonical = _crea_spesa_da_scadenza(s, data)
+        if not canonical:
             continue
-        new_sp = _crea_spesa_da_scadenza(s, data)
-        if new_sp:
-            data["spese"].append(new_sp)
-            created.append(new_sp)
-    if created:
+
+        if match:
+            # Verifica se la spesa esistente ha i dati canonici, altrimenti li corregge
+            changes = {}
+            for k in ("data", "km", "note", "categoria"):
+                if match.get(k) != canonical.get(k):
+                    changes[k] = {"old": match.get(k), "new": canonical.get(k)}
+                    match[k] = canonical.get(k)
+            if changes:
+                fixed.append({"spesa_id": match["id"], "scadenza_id": s["id"], "changes": changes})
+            else:
+                skipped.append({"scadenza_id": s["id"], "spesa_id": match["id"]})
+        else:
+            data["spese"].append(canonical)
+            created.append(canonical)
+
+    if created or fixed:
         save(data)
     return jsonify({
         "created_count": len(created),
+        "fixed_count": len(fixed),
         "skipped_count": len(skipped),
         "created": created,
+        "fixed": fixed,
     })
 
 
