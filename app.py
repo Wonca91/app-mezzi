@@ -571,8 +571,19 @@ def api_scadenze_create():
     if err:
         return _err(err)
     data["scadenze"].append(new)
+
+    # Se viene creata già marcata "pagato" e ha un costo, genera anche la spesa
+    spesa_creata = None
+    if new.get("pagato") and float(new.get("costo") or 0) > 0:
+        spesa_creata = _crea_spesa_da_scadenza(new, data)
+        if spesa_creata:
+            data["spese"].append(spesa_creata)
+
     save(data)
-    return jsonify(new), 201
+    out = dict(new)
+    if spesa_creata:
+        out["_spesa_creata"] = spesa_creata
+    return jsonify(out), 201
 
 
 @app.route("/api/scadenze/<sid>", methods=["PUT"])
@@ -880,6 +891,44 @@ def api_km_delete(kid):
         mezzo["km_attuali"] = max(readings) if readings else 0
     save(data)
     return jsonify({"ok": True})
+
+
+# ── Maintenance: backfill spese da scadenze già pagate ───────────────────────
+@app.route("/api/maintenance/backfill-spese", methods=["POST"])
+def api_backfill_spese():
+    """Per ogni scadenza con pagato=true e costo>0, verifica se esiste una
+       spesa associata; se no, la crea. Match: stesso mezzo + stesso importo
+       + nota che inizia con 'Pagamento <tipo>'."""
+    data = load()
+    created = []
+    skipped = []
+    for s in data["scadenze"]:
+        if not s.get("pagato"):
+            continue
+        costo = float(s.get("costo") or 0)
+        if costo <= 0:
+            continue
+        tipo = s.get("tipo", "altro")
+        prefix = f"Pagamento {tipo}"
+        # cerca match esistente
+        match = next((sp for sp in data["spese"]
+                      if sp["mezzo_id"] == s["mezzo_id"]
+                      and abs(float(sp.get("importo") or 0) - costo) < 0.01
+                      and (sp.get("note") or "").startswith(prefix)), None)
+        if match:
+            skipped.append({"scadenza_id": s["id"], "spesa_id": match["id"]})
+            continue
+        new_sp = _crea_spesa_da_scadenza(s, data)
+        if new_sp:
+            data["spese"].append(new_sp)
+            created.append(new_sp)
+    if created:
+        save(data)
+    return jsonify({
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "created": created,
+    })
 
 
 # ── Meta ──────────────────────────────────────────────────────────────────────
