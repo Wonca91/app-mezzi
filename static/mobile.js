@@ -605,7 +605,7 @@ function renderKm() {
       const delta = prev ? `+${fmtNum(k.km - prev.km)}` : "INIZIO";
       const d = new Date(k.data);
       return `
-        <div class="list-item">
+        <div class="list-item" onclick="editKm('${k.id}')">
           <div class="list-day" style="background:transparent;border:none">
             <div class="list-day-n" style="font-size:14px">${d.getDate()}</div>
             <div class="list-day-m">${MESI[d.getMonth()]}</div>
@@ -1038,7 +1038,9 @@ async function saveScadenza(id) {
     closeModal();
     await reload();
     if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
-    if (resp._rinnovo_creato) toast("Pagato! Rinnovo creato automaticamente", "ok");
+    if (resp._spesa_creata && resp._rinnovo_creato) toast("Pagato! Spesa registrata + rinnovo", "ok");
+    else if (resp._spesa_creata) toast("Pagato! Spesa registrata", "ok");
+    else if (resp._rinnovo_creato) toast("Pagato! Rinnovo creato", "ok");
     else toast(id ? "Scadenza aggiornata" : "Scadenza creata", "ok");
   } catch (e) { toast(e.message, "err"); }
 }
@@ -1154,6 +1156,50 @@ async function saveKm() {
     await reload();
     if (STATE.drillMezzo) openDrill(STATE.drillMezzo);
     toast("Lettura registrata", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function editKm(id) {
+  const k = STATE.km.find(x => x.id === id);
+  if (!k) return;
+  const mezzo = STATE.mezzi.find(m => m.id === k.mezzo_id);
+  openModal("Modifica lettura", `
+    <div class="field">
+      <label class="field-label">Mezzo</label>
+      <input value="${escape(mezzo?.nome || '?')}" disabled style="opacity:.7">
+    </div>
+    <div class="row-2">
+      <div class="field"><label class="field-label">Data</label><input id="f-data" type="date" value="${k.data}"></div>
+      <div class="field"><label class="field-label">Km</label><input id="f-km" type="number" inputmode="numeric" value="${k.km}"></div>
+    </div>
+    <div class="field"><label class="field-label">Note</label><textarea id="f-note">${escape(k.note || '')}</textarea></div>
+    <button class="btn-primary" onclick="saveKmEdit('${id}')">Salva</button>
+    <button class="btn-danger" onclick="askDeleteKm('${id}')">Elimina lettura</button>
+  `);
+}
+
+async function saveKmEdit(id) {
+  try {
+    const body = {
+      data: $("#f-data").value,
+      km: parseInt($("#f-km").value) || 0,
+      note: $("#f-note").value,
+    };
+    await api(`/api/km/${id}`, { method: "PUT", body });
+    closeModal();
+    await reload();
+    toast("Lettura aggiornata", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function askDeleteKm(id) {
+  const ok = await confirmSheet("Eliminare questa lettura km?", { confirmLabel: "Elimina", danger: true });
+  if (!ok) return;
+  try {
+    await api(`/api/km/${id}`, { method: "DELETE" });
+    closeModal();
+    await reload();
+    toast("Lettura eliminata", "ok");
   } catch (e) { toast(e.message, "err"); }
 }
 

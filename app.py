@@ -74,9 +74,18 @@ DEFAULT_DATA = {
 
 TIPI_SCADENZA = ["bollo", "assicurazione", "revisione", "tagliando", "altro"]
 CATEGORIE_SPESA = [
-    "carburante", "manutenzione", "parcheggio",
-    "pedaggio", "multa", "accessori", "altro",
+    "carburante", "manutenzione", "assicurazione", "bollo", "revisione",
+    "parcheggio", "pedaggio", "multa", "accessori", "altro",
 ]
+
+# Mappa tipo scadenza → categoria spesa quando si segna "pagato"
+SCADENZA_TO_CATEGORIA = {
+    "bollo": "bollo",
+    "assicurazione": "assicurazione",
+    "revisione": "revisione",
+    "tagliando": "manutenzione",
+    "altro": "altro",
+}
 
 # Durata di default (mesi) per il rinnovo automatico
 DURATA_DEFAULT_MESI = {
@@ -606,15 +615,51 @@ def api_scadenze_update(sid):
             s["data_scadenza"] = proietta_data(s["km_scadenza"], mezzo.get("km_attuali", 0), kpm)
 
     nuova_creata = None
+    spesa_creata = None
     if not pagato_prima and s.get("pagato"):
         nuova_creata = _crea_rinnovo(s, data)
         if nuova_creata:
             data["scadenze"].append(nuova_creata)
+        # Crea automaticamente la spesa associata al pagamento
+        spesa_creata = _crea_spesa_da_scadenza(s, data)
+        if spesa_creata:
+            data["spese"].append(spesa_creata)
 
     save(data)
-    if nuova_creata:
-        return jsonify({**s, "_rinnovo_creato": nuova_creata})
-    return jsonify(s)
+    out = dict(s)
+    if nuova_creata: out["_rinnovo_creato"] = nuova_creata
+    if spesa_creata: out["_spesa_creata"] = spesa_creata
+    return jsonify(out)
+
+
+def _crea_spesa_da_scadenza(s, data):
+    """Quando una scadenza viene segnata pagato, crea una spesa con il costo."""
+    costo = float(s.get("costo") or 0)
+    if costo <= 0:
+        return None
+    tipo = s.get("tipo", "altro")
+    categoria = SCADENZA_TO_CATEGORIA.get(tipo, "altro")
+    if categoria not in CATEGORIE_SPESA:
+        categoria = "altro"
+    mezzo = next((m for m in data["mezzi"] if m["id"] == s["mezzo_id"]), {})
+    nota_data = ""
+    if s.get("data_scadenza"):
+        try:
+            nota_data = datetime.date.fromisoformat(s["data_scadenza"]).strftime("%d/%m/%Y")
+        except (TypeError, ValueError):
+            pass
+    elif s.get("km_scadenza"):
+        nota_data = f"{int(s['km_scadenza'])} km"
+    return {
+        "id": str(uuid.uuid4())[:8],
+        "mezzo_id": s["mezzo_id"],
+        "data": datetime.date.today().isoformat(),
+        "categoria": categoria,
+        "importo": costo,
+        "km": mezzo.get("km_attuali") or None,
+        "litri": None,
+        "note": f"Pagamento {tipo}" + (f" {nota_data}" if nota_data else ""),
+    }
 
 
 def _crea_rinnovo(s, data):
@@ -795,12 +840,44 @@ def api_km_create():
     return jsonify(new), 201
 
 
+@app.route("/api/km/<kid>", methods=["PUT"])
+def api_km_update(kid):
+    body = request.get_json() or {}
+    data = load()
+    k = next((x for x in data["km_log"] if x["id"] == kid), None)
+    if not k:
+        return _err("not found", 404)
+    if "data" in body:
+        k["data"] = body["data"]
+    if "km" in body:
+        v = _safe_int(body["km"])
+        if v <= 0:
+            return _err("km deve essere > 0")
+        k["km"] = v
+    if "note" in body:
+        k["note"] = (body["note"] or "").strip()
+    # ricalcolo km_attuali del mezzo come max delle letture
+    mezzo = next((m for m in data["mezzi"] if m["id"] == k["mezzo_id"]), None)
+    if mezzo:
+        readings = [x["km"] for x in data["km_log"] if x["mezzo_id"] == k["mezzo_id"] and x.get("km")]
+        if readings:
+            mezzo["km_attuali"] = max(readings)
+    save(data)
+    return jsonify(k)
+
+
 @app.route("/api/km/<kid>", methods=["DELETE"])
 def api_km_delete(kid):
     data = load()
-    if not any(x["id"] == kid for x in data["km_log"]):
+    target = next((x for x in data["km_log"] if x["id"] == kid), None)
+    if not target:
         return _err("not found", 404)
     data["km_log"] = [x for x in data["km_log"] if x["id"] != kid]
+    # ricalcolo km_attuali del mezzo
+    mezzo = next((m for m in data["mezzi"] if m["id"] == target["mezzo_id"]), None)
+    if mezzo:
+        readings = [x["km"] for x in data["km_log"] if x["mezzo_id"] == target["mezzo_id"] and x.get("km")]
+        mezzo["km_attuali"] = max(readings) if readings else 0
     save(data)
     return jsonify({"ok": True})
 
